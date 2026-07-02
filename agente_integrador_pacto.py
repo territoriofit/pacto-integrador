@@ -1496,18 +1496,22 @@ class CRMClient:
             cod_pessoa = aluno.get("codigoPessoa")
             if not cod_pessoa:
                 continue
-            try:
-                r = adm._gw("GET", f"/parcelas/{cod_pessoa}", params={"size": 100})
-                parcelas = r.get("content", []) if isinstance(r, dict) else []
-                atrasadas = [
-                    p for p in parcelas
-                    if p.get("situacao") == "EA" and (p.get("dataVencimento") or 0) < hoje_ms
-                ]
-                if atrasadas:
-                    atrasadas.sort(key=lambda p: p.get("dataVencimento") or 0)
-                    achados.append({"aluno": aluno, "parcelas": atrasadas})
-            except Exception as e:
-                log.warning(f"scan parcelas: erro no cliente {cod}: {e}")
+            # 1 retry: na base completa ~3/2000 clientes dao read timeout (20s)
+            for tentativa in (1, 2):
+                try:
+                    r = adm._gw("GET", f"/parcelas/{cod_pessoa}", params={"size": 100})
+                    parcelas = r.get("content", []) if isinstance(r, dict) else []
+                    atrasadas = [
+                        p for p in parcelas
+                        if p.get("situacao") == "EA" and (p.get("dataVencimento") or 0) < hoje_ms
+                    ]
+                    if atrasadas:
+                        atrasadas.sort(key=lambda p: p.get("dataVencimento") or 0)
+                        achados.append({"aluno": aluno, "parcelas": atrasadas})
+                    break
+                except Exception as e:
+                    if tentativa == 2:
+                        log.warning(f"scan parcelas: erro no cliente {cod}: {e}")
             if (i + 1) % 100 == 0:
                 log.info(f"scan parcelas: {i + 1}/{len(alvo)} alunos, "
                          f"{len(achados)} com parcela atrasada")
@@ -1867,7 +1871,9 @@ class CRMClient:
             ("deals_financeiro",   lambda: self.sync_deals_financeiro(pacto, adm)),
             ("renovacao_mes_atual", lambda: self.sync_renovacao_mes_atual(pacto)),
             ("inadimplentes",      lambda: self.sync_inadimplentes(pacto, adm)),
-            ("parcelas_atrasadas", lambda: self.sync_parcelas_atrasadas(pacto, adm)),
+            # base completa (~2000, ~45min): roda de madrugada junto do diario;
+            # achou 22% mais parcelas que o subset de risco (medido 2026-07-02)
+            ("parcelas_atrasadas", lambda: self.sync_parcelas_atrasadas(pacto, adm, todos_ativos=True)),
         ]:
             try:
                 resultado[nome] = fn()
