@@ -1360,6 +1360,95 @@ class CRMClient:
         log.info(f"sync_ultimo_acesso: {n}/{len(pares)} ok ({erros} falhas de consulta)")
         return n
 
+    def sync_aniversariantes(self, pacto: "PactoClient") -> int:
+        """
+        Marca metadata.aniversariante_mes_atual (+ data_nascimento) nos alunos
+        ATIVOS e INATIVOS que fazem aniversario no mes corrente e desmarca quem
+        saiu do mes. Fonte: dataNascimento da listagem /psec/alunos.
+        Para aniversariante sem ultimo_acesso no metadata (inativos ficam fora
+        do sync_ultimo_acesso) busca tambem o ultimo acesso na catraca.
+        Alimenta a coluna Aniversariantes do Kanban de Alunos.
+        """
+        log.info("CRM sync: aniversariantes do mes (ativos + inativos)...")
+        alunos = pacto.todos_alunos()
+        mes = date.today().month
+
+        aniversariantes = []
+        for a in alunos:
+            if a.get("situacaoAluno") not in ("ATIVO", "INATIVO"):
+                continue
+            cod = a.get("codigoCliente")
+            nasc = _ts_to_date(a.get("dataNascimento")) if a.get("dataNascimento") else None
+            if cod and nasc and nasc.month == mes:
+                aniversariantes.append((a, nasc, _pacto_lead_id(cod, self.tenant_id)))
+        ids_novos = {lid for _, _, lid in aniversariantes}
+
+        rows = []
+
+        # desmarca quem esta com a flag mas nao faz aniversario neste mes
+        r = self.sb.table("leads").select("id,name,status,metadata").eq(
+            "source", "pacto_aluno"
+        ).eq("metadata->>aniversariante_mes_atual", "true").limit(5000).execute()
+        for row in (r.data or []):
+            if row["id"] in ids_novos:
+                continue
+            meta = dict(row.get("metadata") or {})
+            meta["aniversariante_mes_atual"] = False
+            rows.append({
+                "id":        row["id"],
+                "name":      row.get("name"),
+                "status":    row.get("status"),
+                "metadata":  meta,
+                "tenant_id": self.tenant_id,
+            })
+
+        # metadata atual dos aniversariantes em lotes (merge, padrao sync_grupo_risco)
+        BATCH = 80
+        existentes: dict = {}
+        ids = [lid for _, _, lid in aniversariantes]
+        for i in range(0, len(ids), BATCH):
+            r = self.sb.table("leads").select("id,name,status,metadata").in_(
+                "id", ids[i:i+BATCH]
+            ).execute()
+            for row in (r.data or []):
+                existentes[row["id"]] = row
+
+        buscou_acesso = 0
+        for a, nasc, lid in aniversariantes:
+            lead = existentes.get(lid)
+            if lead is None:
+                # ex-aluno ainda nao sincronizado como lead: cria a linha completa
+                row = self._lead_row(a["codigoCliente"], a)
+                meta = row["metadata"]
+            else:
+                meta = dict(lead.get("metadata") or {})
+                row = {
+                    "id":        lid,
+                    "name":      lead.get("name"),
+                    "status":    lead.get("status"),
+                    "metadata":  meta,
+                    "tenant_id": self.tenant_id,
+                }
+            meta["aniversariante_mes_atual"] = True
+            meta["data_nascimento"] = nasc.strftime("%Y-%m-%d")
+            # ultimo acesso na catraca p/ quem nunca recebeu (1 request por aluno)
+            if "ultimo_acesso_synced_at" not in meta:
+                mat = a.get("matriculaZW") or a.get("id")
+                if mat:
+                    try:
+                        ua = pacto.ultimo_acesso_catraca(mat)
+                        meta["ultimo_acesso"] = ua.strftime("%Y-%m-%d") if ua else None
+                        meta["ultimo_acesso_synced_at"] = datetime.now().isoformat()
+                        buscou_acesso += 1
+                    except Exception as e:
+                        log.warning(f"ultimo_acesso aniversariante mat={mat}: {e}")
+            rows.append(row)
+
+        n = self._upsert_batch(rows)
+        log.info(f"sync_aniversariantes: {len(aniversariantes)} aniversariantes no mes "
+                 f"(ativos+inativos), {n} leads atualizados, {buscou_acesso} acessos buscados")
+        return n
+
     def sync_contratos_a_vencer(self, pacto: "PactoClient", dias: int = 30) -> int:
         """Upsert de clientes com contrato a vencer, marcando alerta no metadata."""
         log.info(f"CRM sync: contratos a vencer ({dias}d)...")
@@ -1937,6 +2026,8 @@ class CRMClient:
         resultado = {}
         for nome, fn in [
             ("alunos_ativos",      lambda: self.sync_alunos_ativos(pacto)),
+            # depois de alunos_ativos (que reescreve o metadata) pra re-marcar a flag
+            ("aniversariantes",    lambda: self.sync_aniversariantes(pacto)),
             ("grupo_risco",        lambda: self.sync_grupo_risco(adm)),
             ("pipeline_stages",    lambda: self.sync_pipeline_stages_from_pacto(adm)),
             ("deals_financeiro",   lambda: self.sync_deals_financeiro(pacto, adm)),
@@ -2069,6 +2160,7 @@ if __name__ == "__main__":
  38 - Sync: parcelas atrasadas EA (risco peso>=5 + inadimplentes, ~740)
  39 - Sync: parcelas atrasadas EA (TODOS os ativos, ~2000 -- lento)
  40 - Sync: ultimo acesso catraca -> leads CRM (metadata, ~15min)
+ 41 - Sync: aniversariantes do mes -> leads CRM (metadata)
   0 - Sair
 """
 
@@ -2298,5 +2390,8 @@ if __name__ == "__main__":
         elif op == "40":
             n = _crm().sync_ultimo_acesso(pacto)
             print(f"\nSync ultimo acesso catraca → CRM: {n} leads atualizados")
+        elif op == "41":
+            n = _crm().sync_aniversariantes(pacto)
+            print(f"\nSync aniversariantes do mes → CRM: {n} leads atualizados")
         else:
             print("Opcao invalida.")
