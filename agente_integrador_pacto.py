@@ -241,6 +241,18 @@ class PactoClient:
                 return _ts_to_date(ev.get("data"))
         return None
 
+    def ultimo_acesso_catraca(self, matricula: int) -> datetime | None:
+        """
+        Data do ultimo acesso fisico (catraca) do aluno, via linha-tempo.
+        O acesso na catraca gera evento NOTIFICACAO com descricao 'Chegou'
+        (cobre tambem check-ins Gympass/TotalPass, validado 2026-07-02).
+        """
+        eventos = self.linha_tempo_aluno(matricula)
+        for ev in eventos:
+            if "Chegou" in (ev.get("descricao") or "") or ev.get("evento") in ("CHECKIN", "ACESSOU"):
+                return _ts_to_date(ev.get("data"))
+        return None
+
     def alunos_faltosos(self, dias: int = 7) -> list:
         """
         Retorna alunos ATIVOS sem treino registrado nos ultimos `dias` dias.
@@ -1289,6 +1301,65 @@ class CRMClient:
         log.info(f"sync_grupo_risco: {n}/{len(clientes)} ok ({len(clientes)-n} nao encontrados no CRM)")
         return n
 
+    def sync_ultimo_acesso(self, pacto: "PactoClient") -> int:
+        """
+        Atualiza metadata.ultimo_acesso (data do ultimo acesso fisico na catraca)
+        de todos os alunos ativos. Fonte: linha-tempo por aluno (evento 'Chegou'),
+        1 request por aluno (~0.4s cada; ~15min na base de ~2000 ativos).
+        Quem nunca acessou fica com ultimo_acesso=null (frontend mostra 'sem acesso').
+        """
+        log.info("CRM sync: ultimo acesso catraca...")
+        alunos = pacto.alunos_ativos()
+
+        # busca metadata atual dos leads em lotes (merge, padrao sync_grupo_risco)
+        BATCH = 80
+        existentes: dict = {}
+        pares = [(a, _pacto_lead_id(a["codigoCliente"], self.tenant_id))
+                 for a in alunos if a.get("codigoCliente")]
+        ids = [lid for _, lid in pares]
+        for i in range(0, len(ids), BATCH):
+            r = self.sb.table("leads").select("id,name,status,metadata").in_(
+                "id", ids[i:i+BATCH]
+            ).execute()
+            for row in (r.data or []):
+                existentes[row["id"]] = row
+
+        rows, erros = [], 0
+        for a, lid in pares:
+            if lid not in existentes:
+                continue  # lead ainda nao sincronizado; sync_alunos_ativos o criara
+            mat = a.get("matriculaZW") or a.get("id")
+            if not mat:
+                continue
+            ultimo, falhou = None, False
+            for tentativa in (1, 2):
+                try:
+                    ultimo = pacto.ultimo_acesso_catraca(mat)
+                    falhou = False
+                    break
+                except Exception as e:
+                    falhou = True
+                    if tentativa == 2:
+                        erros += 1
+                        log.warning(f"ultimo_acesso mat={mat}: {e}")
+            if falhou:
+                continue  # nao sobrescreve dado anterior com falha de rede
+            lead = existentes[lid]
+            meta = dict(lead.get("metadata") or {})
+            meta["ultimo_acesso"] = ultimo.strftime("%Y-%m-%d") if ultimo else None
+            meta["ultimo_acesso_synced_at"] = datetime.now().isoformat()
+            rows.append({
+                "id":        lid,
+                "name":      lead.get("name"),
+                "status":    lead.get("status"),
+                "metadata":  meta,
+                "tenant_id": self.tenant_id,
+            })
+
+        n = self._upsert_batch(rows)
+        log.info(f"sync_ultimo_acesso: {n}/{len(pares)} ok ({erros} falhas de consulta)")
+        return n
+
     def sync_contratos_a_vencer(self, pacto: "PactoClient", dias: int = 30) -> int:
         """Upsert de clientes com contrato a vencer, marcando alerta no metadata."""
         log.info(f"CRM sync: contratos a vencer ({dias}d)...")
@@ -1874,6 +1945,9 @@ class CRMClient:
             # base completa (~2000, ~45min): roda de madrugada junto do diario;
             # achou 22% mais parcelas que o subset de risco (medido 2026-07-02)
             ("parcelas_atrasadas", lambda: self.sync_parcelas_atrasadas(pacto, adm, todos_ativos=True)),
+            # 1 request/aluno (~15min na base completa) — alimenta o card do
+            # Kanban de Alunos ("Xd sem vir")
+            ("ultimo_acesso",      lambda: self.sync_ultimo_acesso(pacto)),
         ]:
             try:
                 resultado[nome] = fn()
@@ -1994,6 +2068,7 @@ if __name__ == "__main__":
  37 - Sync: inadimplentes (parcelas em aberto) -> etapa Inadimplente CRM
  38 - Sync: parcelas atrasadas EA (risco peso>=5 + inadimplentes, ~740)
  39 - Sync: parcelas atrasadas EA (TODOS os ativos, ~2000 -- lento)
+ 40 - Sync: ultimo acesso catraca -> leads CRM (metadata, ~15min)
   0 - Sair
 """
 
@@ -2220,5 +2295,8 @@ if __name__ == "__main__":
             print(f"\nSync parcelas atrasadas (base completa) → CRM:")
             for k, v in r.items():
                 print(f"  {k:32}: {v}")
+        elif op == "40":
+            n = _crm().sync_ultimo_acesso(pacto)
+            print(f"\nSync ultimo acesso catraca → CRM: {n} leads atualizados")
         else:
             print("Opcao invalida.")
