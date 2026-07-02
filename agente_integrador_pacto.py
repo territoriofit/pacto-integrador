@@ -1357,8 +1357,24 @@ class CRMClient:
         log.info(f"sync_renovacao_mes_atual: {n}/{len(rows)} vencendo em {inicio:%m/%Y}")
         return n
 
-    def sync_inadimplentes(self, pacto: "PactoClient") -> int:
-        """Upsert de inadimplentes com alerta no metadata."""
+    def sync_inadimplentes(self, pacto: "PactoClient", adm: "PactoADMClient") -> int:
+        """
+        Upsert de inadimplentes com alerta no metadata + dados da parcela
+        atrasada mais antiga (codigo, vencimento, numero de tentativas de
+        cobranca), buscados via /parcelas/{codigoPessoa} por cliente.
+
+        PENDENTE (retomar depois, 2026-07-02): a base usada aqui
+        (pacto.inadimplentes(), = contrato vencido) NAO e o mesmo grupo de
+        quem tem parcela realmente atrasada. Testado em 52 inadimplentes
+        (contrato vencido) e nenhum tinha parcela EA vencida (so PG/RG) --
+        contrato vencido != parcela em atraso, sao coisas diferentes no Pacto.
+        Pra achar quem tem parcela de verdade atrasada e preciso escanear
+        aluno por aluno (nao existe endpoint em lote) com
+        situacao == "EA" ("Em aberto") e dataVencimento no passado -- ver
+        logica abaixo. Decidir com o usuario se troca a base de
+        pacto.inadimplentes() pra alunos_ativos() completo (~2000, mais lento)
+        ou um subconjunto (ex: grupo de risco + inadimplentes atuais, ~700).
+        """
         log.info("CRM sync: inadimplentes...")
         inadimpl = pacto.inadimplentes()
         rows = []
@@ -1370,6 +1386,45 @@ class CRMClient:
             row["status"]                    = "inadimplente"
             row["metadata"]["alerta"]        = "inadimplente"
             row["metadata"]["dias_atraso"]   = a.get("dias_atraso")
+
+            # Parcela em aberto e vencida (situacao=EA "Em aberto" + dataVencimento no
+            # passado) mais antiga: codigo, vencimento, tentativas de cobranca.
+            # IMPORTANTE:
+            #  - O codigo correto e "EA", nao "AB" (confirmado via situacaoDescricao
+            #    == "Em aberto" em dados reais).
+            #  - Usa codigoPessoa do proprio TreinoWeb -- pessoa_de_cliente()/ADM
+            #    retorna sempre codigo=1 (registro generico da empresa, nao da
+            #    pessoa) neste token, entao NAO usar adm.parcelas_cliente()/
+            #    pessoa_de_cliente() aqui.
+            #  - "EA" sozinho inclui parcelas futuras do plano de pagamento (ainda
+            #    nao venceram) -- filtra por dataVencimento < hoje pra pegar só
+            #    quem esta de fato atrasado.
+            cod_pessoa = a.get("codigoPessoa")
+            try:
+                if not cod_pessoa:
+                    raise ValueError("sem codigoPessoa")
+                hoje_ms = int(datetime.now().timestamp() * 1000)
+                parcelas = adm._gw("GET", f"/parcelas/{cod_pessoa}", params={"size": 100})
+                parcelas = parcelas.get("content", []) if isinstance(parcelas, dict) else []
+                atrasadas = [
+                    p for p in parcelas
+                    if p.get("situacao") == "EA" and (p.get("dataVencimento") or 0) < hoje_ms
+                ]
+                atrasadas.sort(key=lambda p: p.get("dataVencimento") or 0)
+                if atrasadas:
+                    p = atrasadas[0]
+                    venc_ts = p.get("dataVencimento")
+                    venc_date = _ts_to_date(venc_ts) if venc_ts else None
+                    row["metadata"]["parcela_atrasada"] = {
+                        "codigo":               p.get("codigo"),
+                        "vencimento":           venc_date.strftime("%Y-%m-%d") if venc_date else None,
+                        "nr_tentativas":        p.get("nrTentativas"),
+                        "valor":                p.get("valor"),
+                        "total_parcelas_abertas": len(atrasadas),
+                    }
+            except Exception as e:
+                log.warning(f"parcelas em aberto falharam pro cliente {cod}: {e}")
+
             rows.append(row)
         n = self._upsert_batch(rows)
         log.info(f"sync_inadimplentes: {n}/{len(inadimpl)} ok")
@@ -1601,6 +1656,7 @@ class CRMClient:
             ("pipeline_stages",    lambda: self.sync_pipeline_stages_from_pacto(adm)),
             ("deals_financeiro",   lambda: self.sync_deals_financeiro(pacto, adm)),
             ("renovacao_mes_atual", lambda: self.sync_renovacao_mes_atual(pacto)),
+            ("inadimplentes",      lambda: self.sync_inadimplentes(pacto, adm)),
         ]:
             try:
                 resultado[nome] = fn()
@@ -1703,6 +1759,7 @@ if __name__ == "__main__":
  34 - Iniciar scheduler (horario + diario, loop continuo)
  35 - Sync: alunos inativos -> leads CRM
  36 - Sync: renovacao mes atual -> etapa Renovacao CRM
+ 37 - Sync: inadimplentes (parcelas em aberto) -> etapa Inadimplente CRM
   0 - Sair
 """
 
@@ -1916,5 +1973,8 @@ if __name__ == "__main__":
         elif op == "36":
             n = _crm().sync_renovacao_mes_atual(pacto)
             print(f"\nSync renovação mês atual → CRM: {n} leads na etapa Renovação")
+        elif op == "37":
+            n = _crm().sync_inadimplentes(pacto, adm)
+            print(f"\nSync inadimplentes → CRM: {n} leads (com dados de parcela em aberto)")
         else:
             print("Opcao invalida.")
