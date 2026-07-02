@@ -1927,12 +1927,18 @@ if __name__ == "__main__":
     adm   = PactoADMClient()
     crm   = None  # inicializado sob demanda (requer supabase instalado)
 
-    # Modo nao-interativo pro scan completo (ex: Task Scheduler de madrugada):
-    #   python agente_integrador_pacto.py --scan-parcelas-completo
+    # Modos nao-interativos (GitHub Actions / Task Scheduler):
+    #   python agente_integrador_pacto.py --scan-parcelas-completo  (so parcelas, base inteira)
+    #   python agente_integrador_pacto.py --sync-diario             (sincronizar_tudo)
     if "--scan-parcelas-completo" in sys.argv:
         r = CRMClient().sync_parcelas_atrasadas(pacto, adm, todos_ativos=True)
         print(json.dumps(r, ensure_ascii=False, indent=2))
         raise SystemExit(0)
+    if "--sync-diario" in sys.argv:
+        r = CRMClient().sincronizar_tudo(pacto, adm)
+        print(json.dumps(r, ensure_ascii=False, indent=2, default=str))
+        # falha o job se algum sync deu erro (visivel no historico do Actions)
+        raise SystemExit(1 if any(isinstance(v, str) and v.startswith("erro") for v in r.values()) else 0)
 
     def _crm() -> CRMClient:
         global crm

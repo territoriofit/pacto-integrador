@@ -1,0 +1,49 @@
+# Sync diário Pacto → CRM Território Fit
+#
+# Roda às 05:30 UTC (02:30 BRT): mesmo com atraso do scheduler do Actions
+# (~15-30 min em pico) + ~50 min de scan completo, termina bem antes das
+# 05:00 BRT, quando a academia abre.
+#
+# Consumo: ~45-55 min/dia ≈ 1.400-1.700 min/mês (cota Free: 2.000 min/mês
+# em repo privado — acompanhar em Settings > Billing).
+#
+# Secrets necessários (Settings > Secrets and variables > Actions):
+#   PACTO_TOKEN, PACTO_CHAVE, PACTO_EMPRESA_ID, PACTO_CTX,
+#   PACTO_USER, PACTO_PWD, SUPABASE_KEY, CRM_TENANT_ID
+
+name: Sync diário Pacto → CRM
+
+on:
+  schedule:
+    - cron: "30 5 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: sync-diario
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependências
+        run: pip install requests python-dotenv supabase
+
+      - name: Sync completo (alunos, risco, fases, deals, parcelas atrasadas)
+        env:
+          PACTO_TOKEN: ${{ secrets.PACTO_TOKEN }}
+          PACTO_CHAVE: ${{ secrets.PACTO_CHAVE }}
+          PACTO_EMPRESA_ID: ${{ secrets.PACTO_EMPRESA_ID }}
+          PACTO_CTX: ${{ secrets.PACTO_CTX }}
+          PACTO_USER: ${{ secrets.PACTO_USER }}
+          PACTO_PWD: ${{ secrets.PACTO_PWD }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          CRM_TENANT_ID: ${{ secrets.CRM_TENANT_ID }}
+        run: python agente_integrador_pacto.py --sync-diario
