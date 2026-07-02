@@ -1359,21 +1359,14 @@ class CRMClient:
 
     def sync_inadimplentes(self, pacto: "PactoClient", adm: "PactoADMClient") -> int:
         """
-        Upsert de inadimplentes com alerta no metadata + dados da parcela
-        atrasada mais antiga (codigo, vencimento, numero de tentativas de
-        cobranca), buscados via /parcelas/{codigoPessoa} por cliente.
+        Upsert de inadimplentes (contrato vencido) com alerta no metadata +
+        dados da parcela atrasada mais antiga (codigo, vencimento, numero de
+        tentativas de cobranca), buscados via /parcelas/{codigoPessoa}.
 
-        PENDENTE (retomar depois, 2026-07-02): a base usada aqui
-        (pacto.inadimplentes(), = contrato vencido) NAO e o mesmo grupo de
-        quem tem parcela realmente atrasada. Testado em 52 inadimplentes
-        (contrato vencido) e nenhum tinha parcela EA vencida (so PG/RG) --
-        contrato vencido != parcela em atraso, sao coisas diferentes no Pacto.
-        Pra achar quem tem parcela de verdade atrasada e preciso escanear
-        aluno por aluno (nao existe endpoint em lote) com
-        situacao == "EA" ("Em aberto") e dataVencimento no passado -- ver
-        logica abaixo. Decidir com o usuario se troca a base de
-        pacto.inadimplentes() pra alunos_ativos() completo (~2000, mais lento)
-        ou um subconjunto (ex: grupo de risco + inadimplentes atuais, ~700).
+        NOTA (2026-07-02): contrato vencido != parcela em atraso no Pacto.
+        Quem tem parcela realmente atrasada (situacao EA + vencimento no
+        passado) e coberto por sync_parcelas_atrasadas(), que escaneia o
+        grupo de risco (peso >= 5) + inadimplentes aluno a aluno.
         """
         log.info("CRM sync: inadimplentes...")
         inadimpl = pacto.inadimplentes()
@@ -1429,6 +1422,223 @@ class CRMClient:
         n = self._upsert_batch(rows)
         log.info(f"sync_inadimplentes: {n}/{len(inadimpl)} ok")
         return n
+
+    # -- Parcelas atrasadas (situacao EA + vencimento no passado) -------------
+
+    _PARCELA_NS = uuid.UUID("c0b4a5d6-cafe-5678-abcd-9876543210ab")
+
+    @staticmethod
+    def _motivo_falha_parcela(p: dict) -> str:
+        """
+        Motivo (derivado) pelo qual a parcela nao foi cobrada.
+
+        A API do Pacto NAO expoe o retorno da operadora (investigado em
+        2026-07-02): o objeto parcela so traz nrTentativas; os BIs
+        /v2-pendencias e /v2-inadimplencia retornam 500 neste token; e o
+        gateway nao roteia nenhum endpoint de historico de cobranca
+        (/cobranca/*, /transacoes, /parcelas/{id}/tentativas -- todos 404).
+        Derivamos o melhor motivo possivel do que existe na parcela.
+        """
+        nt = p.get("nrTentativas") or 0
+        desc = (p.get("descricao") or "").upper()
+        if nt > 0:
+            plural = "s" if nt != 1 else ""
+            return f"Cobranca automatica sem sucesso ({nt} tentativa{plural})"
+        if "RENEGOCIA" in desc:
+            return "Parcela renegociada nao paga"
+        return "Sem tentativa de cobranca registrada (boleto/pix/manual nao pago)"
+
+    def scan_parcelas_atrasadas(self, pacto: "PactoClient", adm: "PactoADMClient",
+                                peso_minimo: int = 5,
+                                todos_ativos: bool = False) -> list[dict]:
+        """
+        Escaneia aluno a aluno as parcelas EA ("Em aberto") com dataVencimento
+        no passado -- as que o sistema tentou cobrar e nao conseguiu.
+
+        Base do scan (nao existe endpoint em lote; /v1/movconta ignora filtros
+        server-side, entao o filtro e todo client-side):
+          - padrao: grupo de risco com peso >= peso_minimo (~724 com peso>=5)
+            + inadimplentes de contrato vencido (~46) -- uniao ~740 alunos.
+          - todos_ativos=True: escaneia a base ativa inteira (~2000 alunos,
+            ~2x mais lento; preparado pra rodar de madrugada).
+
+        Retorna [{"aluno": <aluno TreinoWeb>, "parcelas": [parcela EA vencida...]}]
+        com as parcelas ordenadas da mais antiga pra mais recente.
+        """
+        ativos  = pacto.alunos_ativos()
+        por_cod = {a.get("codigoCliente"): a for a in ativos if a.get("codigoCliente")}
+        hoje    = datetime.now()
+        hoje_ms = int(hoje.timestamp() * 1000)
+
+        # inadimplentes (contrato vencido) calculados localmente pra nao
+        # refazer o fetch de alunos_ativos()
+        inad_cods = set()
+        for cod, a in por_cod.items():
+            venc = _ts_to_date((a.get("contratoZW") or {}).get("vencimento"))
+            if venc and venc < hoje:
+                inad_cods.add(cod)
+
+        if todos_ativos:
+            alvo = set(por_cod)
+        else:
+            risco = adm.grupo_risco()
+            alvo  = {c["cliente"] for c in risco
+                     if c.get("cliente") and (c.get("peso") or 0) >= peso_minimo}
+            alvo |= inad_cods
+            alvo &= set(por_cod)
+
+        log.info(f"scan_parcelas_atrasadas: escaneando {len(alvo)} alunos "
+                 f"({'todos ativos' if todos_ativos else f'risco peso>={peso_minimo} + inadimplentes'})...")
+
+        achados = []
+        for i, cod in enumerate(sorted(alvo)):
+            aluno      = por_cod[cod]
+            cod_pessoa = aluno.get("codigoPessoa")
+            if not cod_pessoa:
+                continue
+            try:
+                r = adm._gw("GET", f"/parcelas/{cod_pessoa}", params={"size": 100})
+                parcelas = r.get("content", []) if isinstance(r, dict) else []
+                atrasadas = [
+                    p for p in parcelas
+                    if p.get("situacao") == "EA" and (p.get("dataVencimento") or 0) < hoje_ms
+                ]
+                if atrasadas:
+                    atrasadas.sort(key=lambda p: p.get("dataVencimento") or 0)
+                    achados.append({"aluno": aluno, "parcelas": atrasadas})
+            except Exception as e:
+                log.warning(f"scan parcelas: erro no cliente {cod}: {e}")
+            if (i + 1) % 100 == 0:
+                log.info(f"scan parcelas: {i + 1}/{len(alvo)} alunos, "
+                         f"{len(achados)} com parcela atrasada")
+
+        total_parcelas = sum(len(x["parcelas"]) for x in achados)
+        log.info(f"scan_parcelas_atrasadas: {len(achados)} alunos com "
+                 f"{total_parcelas} parcelas atrasadas (de {len(alvo)} escaneados)")
+        return achados
+
+    def sync_parcelas_atrasadas(self, pacto: "PactoClient", adm: "PactoADMClient",
+                                peso_minimo: int = 5,
+                                todos_ativos: bool = False) -> dict:
+        """
+        Scan + gravacao das parcelas atrasadas no Supabase:
+          1. tabela parcelas_atrasadas: 1 linha por parcela (nome, matricula,
+             codigo da parcela, vencimento, motivo da falha, tentativas);
+             parcelas que sairam do atraso (pagas/renegociadas) sao removidas.
+          2. leads: metadata.parcela_atrasada + alerta/status inadimplente
+             (merge com metadata existente pra nao perder grupo_risco etc);
+             quem nao tem mais parcela atrasada tem a flag limpa.
+        """
+        achados    = self.scan_parcelas_atrasadas(pacto, adm, peso_minimo, todos_ativos)
+        agora      = datetime.now()
+        scan_start = agora.isoformat()
+
+        # -- 1) tabela parcelas_atrasadas -----------------------------------
+        rows_parc = []
+        por_lead  = {}  # lead_id -> (aluno, parcelas)
+        for item in achados:
+            a    = item["aluno"]
+            cod  = a.get("codigoCliente")
+            lid  = _pacto_lead_id(cod, self.tenant_id)
+            por_lead[lid] = item
+            for p in item["parcelas"]:
+                venc = _ts_to_date(p.get("dataVencimento"))
+                rows_parc.append({
+                    "id":             str(uuid.uuid5(self._PARCELA_NS, f"{self.tenant_id}:{p.get('codigo')}")),
+                    "tenant_id":      self.tenant_id,
+                    "lead_id":        lid,
+                    "nome_aluno":     a.get("nome"),
+                    "matricula":      str(a.get("matriculaZW") or a.get("id") or ""),
+                    "codigo_cliente": cod,
+                    "codigo_pessoa":  a.get("codigoPessoa"),
+                    "parcela_codigo": p.get("codigo"),
+                    "contrato":       p.get("contrato"),
+                    "descricao":      p.get("descricao"),
+                    "valor":          p.get("valor"),
+                    "data_vencimento": venc.strftime("%Y-%m-%d") if venc else None,
+                    "dias_atraso":    (agora - venc).days if venc else None,
+                    "nr_tentativas":  p.get("nrTentativas") or 0,
+                    "motivo_falha":   self._motivo_falha_parcela(p),
+                    "synced_at":      scan_start,
+                })
+        for i in range(0, len(rows_parc), 200):
+            self.sb.table("parcelas_atrasadas").upsert(rows_parc[i:i + 200]).execute()
+        # remove parcelas que nao apareceram neste scan (pagas/renegociadas)
+        self.sb.table("parcelas_atrasadas").delete().eq(
+            "tenant_id", self.tenant_id
+        ).lt("synced_at", scan_start).execute()
+
+        # -- 2) leads: flag + resumo no metadata (merge, padrao sync_grupo_risco)
+        BATCH = 80
+        ids = list(por_lead.keys())
+        existentes: dict = {}
+        for i in range(0, len(ids), BATCH):
+            r = self.sb.table("leads").select("id,name,status,metadata").in_(
+                "id", ids[i:i + BATCH]
+            ).execute()
+            for row in (r.data or []):
+                existentes[row["id"]] = row
+
+        rows_leads = []
+        for lid, item in por_lead.items():
+            if lid not in existentes:
+                continue  # lead ainda nao sincronizado; sync_alunos_ativos o criara
+            a, parcelas = item["aluno"], item["parcelas"]
+            p    = parcelas[0]  # mais antiga
+            venc = _ts_to_date(p.get("dataVencimento"))
+            lead = existentes[lid]
+            meta = dict(lead.get("metadata") or {})
+            meta["alerta"] = "inadimplente"
+            meta["parcela_atrasada"] = {
+                "codigo":                 p.get("codigo"),
+                "vencimento":             venc.strftime("%Y-%m-%d") if venc else None,
+                "dias_atraso":            (agora - venc).days if venc else None,
+                "nr_tentativas":          p.get("nrTentativas") or 0,
+                "valor":                  p.get("valor"),
+                "motivo_falha":           self._motivo_falha_parcela(p),
+                "matricula":              str(a.get("matriculaZW") or a.get("id") or ""),
+                "total_parcelas_abertas": len(parcelas),
+            }
+            rows_leads.append({
+                "id":        lid,
+                "name":      lead.get("name"),
+                "status":    "inadimplente",
+                "metadata":  meta,
+                "tenant_id": self.tenant_id,
+            })
+        n_leads = self._upsert_batch(rows_leads)
+
+        # -- 3) limpa a flag de quem regularizou -----------------------------
+        r = self.sb.table("leads").select("id,name,status,metadata").eq(
+            "tenant_id", self.tenant_id
+        ).eq("source", "pacto_aluno").not_.is_(
+            "metadata->parcela_atrasada", "null"
+        ).execute()
+        limpos = []
+        for lead in (r.data or []):
+            if lead["id"] in por_lead:
+                continue
+            meta = dict(lead.get("metadata") or {})
+            meta.pop("parcela_atrasada", None)
+            if meta.get("alerta") == "inadimplente":
+                meta.pop("alerta", None)
+            limpos.append({
+                "id":        lead["id"],
+                "name":      lead.get("name"),
+                "status":    "cliente" if lead.get("status") == "inadimplente" else lead.get("status"),
+                "metadata":  meta,
+                "tenant_id": self.tenant_id,
+            })
+        self._upsert_batch(limpos)
+
+        resultado = {
+            "alunos_escaneados_com_parcela": len(achados),
+            "parcelas_atrasadas":            len(rows_parc),
+            "leads_marcados":                n_leads,
+            "leads_limpos":                  len(limpos),
+        }
+        log.info(f"sync_parcelas_atrasadas: {resultado}")
+        return resultado
 
     # -- Prioridade 3: Fases CRM Pacto → sales_pipeline_stages ---------------
 
@@ -1657,6 +1867,7 @@ class CRMClient:
             ("deals_financeiro",   lambda: self.sync_deals_financeiro(pacto, adm)),
             ("renovacao_mes_atual", lambda: self.sync_renovacao_mes_atual(pacto)),
             ("inadimplentes",      lambda: self.sync_inadimplentes(pacto, adm)),
+            ("parcelas_atrasadas", lambda: self.sync_parcelas_atrasadas(pacto, adm)),
         ]:
             try:
                 resultado[nome] = fn()
@@ -1704,9 +1915,18 @@ def crm_run_scheduler(crm: "CRMClient", pacto: PactoClient,
 # -- CLI interativo -----------------------------------------------------------
 
 if __name__ == "__main__":
+    import sys
+
     pacto = PactoClient()
     adm   = PactoADMClient()
     crm   = None  # inicializado sob demanda (requer supabase instalado)
+
+    # Modo nao-interativo pro scan completo (ex: Task Scheduler de madrugada):
+    #   python agente_integrador_pacto.py --scan-parcelas-completo
+    if "--scan-parcelas-completo" in sys.argv:
+        r = CRMClient().sync_parcelas_atrasadas(pacto, adm, todos_ativos=True)
+        print(json.dumps(r, ensure_ascii=False, indent=2))
+        raise SystemExit(0)
 
     def _crm() -> CRMClient:
         global crm
@@ -1760,6 +1980,8 @@ if __name__ == "__main__":
  35 - Sync: alunos inativos -> leads CRM
  36 - Sync: renovacao mes atual -> etapa Renovacao CRM
  37 - Sync: inadimplentes (parcelas em aberto) -> etapa Inadimplente CRM
+ 38 - Sync: parcelas atrasadas EA (risco peso>=5 + inadimplentes, ~740)
+ 39 - Sync: parcelas atrasadas EA (TODOS os ativos, ~2000 -- lento)
   0 - Sair
 """
 
@@ -1976,5 +2198,15 @@ if __name__ == "__main__":
         elif op == "37":
             n = _crm().sync_inadimplentes(pacto, adm)
             print(f"\nSync inadimplentes → CRM: {n} leads (com dados de parcela em aberto)")
+        elif op == "38":
+            r = _crm().sync_parcelas_atrasadas(pacto, adm)
+            print(f"\nSync parcelas atrasadas → CRM:")
+            for k, v in r.items():
+                print(f"  {k:32}: {v}")
+        elif op == "39":
+            r = _crm().sync_parcelas_atrasadas(pacto, adm, todos_ativos=True)
+            print(f"\nSync parcelas atrasadas (base completa) → CRM:")
+            for k, v in r.items():
+                print(f"  {k:32}: {v}")
         else:
             print("Opcao invalida.")
