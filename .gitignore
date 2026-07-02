@@ -1,0 +1,4 @@
+.env.integracao
+__pycache__/
+*.pyc
+*.log
