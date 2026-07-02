@@ -244,12 +244,15 @@ class PactoClient:
     def ultimo_acesso_catraca(self, matricula: int) -> datetime | None:
         """
         Data do ultimo acesso fisico (catraca) do aluno, via linha-tempo.
-        O acesso na catraca gera evento NOTIFICACAO com descricao 'Chegou'
-        (cobre tambem check-ins Gympass/TotalPass, validado 2026-07-02).
+        O acesso na catraca gera evento NOTIFICACAO cuja descricao varia:
+        'Notificacao: Chegou' ou 'Notificacao: Aluno chegou e possui Indice
+        de Risco' (grupo de risco) — por isso o match e case-insensitive em
+        'chegou'. Cobre tambem check-ins Gympass/TotalPass.
         """
         eventos = self.linha_tempo_aluno(matricula)
         for ev in eventos:
-            if "Chegou" in (ev.get("descricao") or "") or ev.get("evento") in ("CHECKIN", "ACESSOU"):
+            desc = (ev.get("descricao") or "").lower()
+            if "chegou" in desc or ev.get("evento") in ("CHECKIN", "ACESSOU"):
                 return _ts_to_date(ev.get("data"))
         return None
 
