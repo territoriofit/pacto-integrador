@@ -2024,11 +2024,92 @@ class CRMClient:
                 resultado[nome] = f"erro: {e}"
         return resultado
 
+    # -- Merge webhook ↔ Pacto ------------------------------------------------
+
+    def merge_leads_webhook_pacto(self) -> int:
+        """
+        Funde leads criados pelo webhook do WhatsApp (source NULL) com o
+        cadastro Pacto da mesma pessoa (mesmos últimos 8 dígitos do fone —
+        o mesmo critério de matching que o webhook usa). O lead Pacto
+        sobrevive (UUID determinístico, referenciado por deals/parcelas);
+        mensagens e métricas de inbox são reapontadas antes de deletar o
+        duplicado. Entre múltiplos candidatos Pacto (famílias compartilham
+        telefone), prioriza aluno ativo/inadimplente e depois o mais antigo.
+        """
+        webhook = (self.sb.table("leads")
+                   .select("id,name,phone,photo_url")
+                   .is_("source", "null").execute().data or [])
+
+        def last8(p) -> str | None:
+            d = "".join(c for c in (p or "") if c.isdigit())
+            return d[-8:] if len(d) >= 10 else None
+
+        if not any(last8(w.get("phone")) for w in webhook):
+            return 0
+
+        # Indexa a base Pacto por últimos 8 dígitos (paginado)
+        by8: dict = {}
+        page = 0
+        while True:
+            r = (self.sb.table("leads")
+                 .select("id,name,phone,status,photo_url,metadata,created_at")
+                 .not_.is_("source", "null")
+                 .range(page * 1000, page * 1000 + 999).execute())
+            rows = r.data or []
+            for p in rows:
+                k = last8(p.get("phone"))
+                if k:
+                    by8.setdefault(k, []).append(p)
+            if len(rows) < 1000:
+                break
+            page += 1
+
+        merged = 0
+        for w in webhook:
+            k = last8(w.get("phone"))
+            candidatos = by8.get(k or "", [])
+            if not candidatos:
+                continue
+            prioridade = {"cliente": 0, "inadimplente": 0}
+            keep = sorted(candidatos,
+                          key=lambda c: (prioridade.get(c.get("status"), 1),
+                                         c.get("created_at") or ""))[0]
+            try:
+                self.sb.table("whatsapp_messages").update(
+                    {"lead_id": keep["id"]}).eq("lead_id", w["id"]).execute()
+                # métricas de inbox: reaponta, ou descarta se o Pacto já tem
+                tem = (self.sb.table("cs_inbox_metrics").select("id")
+                       .eq("lead_id", keep["id"]).limit(1).execute().data or [])
+                if tem:
+                    self.sb.table("cs_inbox_metrics").delete().eq(
+                        "lead_id", w["id"]).execute()
+                else:
+                    self.sb.table("cs_inbox_metrics").update(
+                        {"lead_id": keep["id"]}).eq("lead_id", w["id"]).execute()
+                updates = {"metadata": {**(keep.get("metadata") or {}),
+                                        "whatsapp_pushname": w.get("name"),
+                                        "merged_from_lead": w["id"]}}
+                if w.get("photo_url") and not keep.get("photo_url"):
+                    updates["photo_url"] = w["photo_url"]
+                self.sb.table("leads").update(updates).eq(
+                    "id", keep["id"]).execute()
+                self.sb.table("leads").delete().eq("id", w["id"]).execute()
+                merged += 1
+                log.info(f"Merge: '{w.get('name')}' ({w.get('phone')}) → "
+                         f"'{keep.get('name')}' [{keep.get('status')}]")
+            except Exception as e:
+                log.warning(f"Merge falhou {w['id']} → {keep['id']}: {e}")
+        log.info(f"Merge webhook↔Pacto: {merged} lead(s) fundido(s)")
+        return merged
+
     def sincronizar_diario(self, pacto: "PactoClient", adm: "PactoADMClient") -> dict:
         """Sync completo — rodar uma vez ao dia."""
         resultado = {}
         for nome, fn in [
             ("alunos_ativos",      lambda: self.sync_alunos_ativos(pacto)),
+            # logo após alunos_ativos: quem conversou no WhatsApp antes de
+            # virar aluno ganha lead Pacto hoje — funde o lead do webhook nele
+            ("merge_webhook_pacto", lambda: self.merge_leads_webhook_pacto()),
             # depois de alunos_ativos (que reescreve o metadata) pra re-marcar a flag
             ("aniversariantes",    lambda: self.sync_aniversariantes(pacto)),
             ("grupo_risco",        lambda: self.sync_grupo_risco(adm)),
@@ -2164,6 +2245,7 @@ if __name__ == "__main__":
  39 - Sync: parcelas atrasadas EA (TODOS os ativos, ~2000 -- lento)
  40 - Sync: ultimo acesso catraca -> leads CRM (metadata, ~15min)
  41 - Sync: aniversariantes do mes -> leads CRM (metadata)
+ 42 - Merge: leads do webhook WhatsApp -> cadastro Pacto (mesmo fone)
   0 - Sair
 """
 
@@ -2396,5 +2478,8 @@ if __name__ == "__main__":
         elif op == "41":
             n = _crm().sync_aniversariantes(pacto)
             print(f"\nSync aniversariantes do mes → CRM: {n} leads atualizados")
+        elif op == "42":
+            n = _crm().merge_leads_webhook_pacto()
+            print(f"\nMerge leads webhook ↔ Pacto: {n} lead(s) fundido(s)")
         else:
             print("Opcao invalida.")
