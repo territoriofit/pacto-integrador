@@ -551,8 +551,8 @@ class PactoADMClient:
             "Content-Type":  "application/json",
         })
 
-    def _gw(self, method: str, path: str, **kwargs):
-        r = self.session.request(method, f"{self.base}{path}", timeout=20, **kwargs)
+    def _gw(self, method: str, path: str, timeout: int = 20, **kwargs):
+        r = self.session.request(method, f"{self.base}{path}", timeout=timeout, **kwargs)
         if r.status_code in (200, 201):
             try:
                 return r.json()
@@ -567,7 +567,8 @@ class PactoADMClient:
 
     def meta_crm(self, data_inicio: date, data_fim: date) -> list:
         """Retorna metas CRM por fase para o período informado."""
-        r = self._gw("GET", "/meta-crm", params={
+        # janelas de 30 dias podem demorar >20s no gateway — timeout maior
+        r = self._gw("GET", "/meta-crm", timeout=90, params={
             "dataInicio": self._epoch_ms(data_inicio),
             "dataFim":    self._epoch_ms(data_fim),
         })
@@ -579,7 +580,7 @@ class PactoADMClient:
             return {"content": [], "totalElements": 0}
         params = [("codigosFecharMeta", ",".join(str(c) for c in codigos)),
                   ("page", page), ("size", size)]
-        return self._gw("GET", "/meta-crm/detalhada", params=params)
+        return self._gw("GET", "/meta-crm/detalhada", timeout=90, params=params)
 
     def visitantes_24h(self, d: date) -> dict:
         """
@@ -606,13 +607,14 @@ class PactoADMClient:
         detalhado = self.meta_crm_detalhada(ho_codes)
         visitantes = [
             {
-                "nome":       v.get("nome"),
-                "matricula":  v.get("matricula"),
-                "situacao":   v.get("situacao"),
-                "dataMeta":   v.get("dataMeta"),
-                "consultora": v.get("nomeColaborador"),
-                "telefone":   v.get("telefone"),
-                "email":      v.get("email"),
+                "nome":          v.get("nome"),
+                "matricula":     v.get("matricula"),
+                "codigoCliente": v.get("codigoCliente"),
+                "situacao":      v.get("situacao"),
+                "dataMeta":      v.get("dataMeta"),
+                "consultora":    v.get("nomeColaborador"),
+                "telefone":      v.get("telefone"),
+                "email":         v.get("email"),
             }
             for v in detalhado.get("content", [])
         ]
@@ -1091,6 +1093,15 @@ def _pacto_lead_id(pacto_codigo: int, tenant_id: str) -> str:
     return str(uuid.uuid5(_PACTO_NS, f"{tenant_id}:{pacto_codigo}"))
 
 
+def _data_meta_iso(data_meta) -> str | None:
+    """Converte dataMeta do meta-crm ('DD/MM/YYYY') para ISO 'YYYY-MM-DD'."""
+    try:
+        d, m, y = str(data_meta or "").strip().split("/")
+        return f"{y}-{m.zfill(2)}-{d.zfill(2)}"
+    except Exception:
+        return None
+
+
 class CRMClient:
     """
     Integração Pacto → CRM Território Fit (Supabase).
@@ -1230,12 +1241,14 @@ class CRMClient:
         r = adm.visitantes_24h(data)
         rows = []
         for v in r.get("visitantes", []):
-            mat = v.get("matricula")
-            if not mat:
+            # chave = codigoCliente, o mesmo keyspace dos alunos e da base
+            # completa de visitantes — visitante que matricular vira o mesmo lead
+            cod = v.get("codigoCliente")
+            if not cod:
                 continue
             tel = "".join(c for c in (v.get("telefone") or "") if c.isdigit()) or None
             rows.append({
-                "id":                _pacto_lead_id(mat, self.tenant_id),
+                "id":                _pacto_lead_id(cod, self.tenant_id),
                 "name":              v.get("nome"),
                 "phone":             tel,
                 "email":             v.get("email"),
@@ -1245,10 +1258,12 @@ class CRMClient:
                 "pipeline_stage_id": stage_id,
                 "tenant_id":         self.tenant_id,
                 "metadata": {
-                    "pacto_codigo":     mat,
+                    "pacto_codigo":     cod,
+                    "pacto_matricula":  v.get("matricula"),
                     "pacto_situacao":   v.get("situacao"),
                     "pacto_consultora": v.get("consultora"),
                     "pacto_data_meta":  str(v.get("dataMeta", "")),
+                    "data_visita":      _data_meta_iso(v.get("dataMeta")),
                     "synced_at":        datetime.now().isoformat(),
                 },
             })
@@ -2102,22 +2117,64 @@ class CRMClient:
         log.info(f"Merge webhook↔Pacto: {merged} lead(s) fundido(s)")
         return merged
 
-    def sync_visitantes_antigos(self, pacto: "PactoClient") -> int:
+    def _mapa_datas_visita(self, adm: "PactoADMClient", meses: int = 24) -> dict:
         """
-        Todos os cadastros com situação VISITANTE no Pacto (~10 mil, base
-        histórica) viram leads na fase 'Visitantes Antigos' do pipeline
-        (aba Leads). Quem já foi movido manualmente para outra fase do
-        kanban mantém a fase — o sync não briga com o trabalho do time.
-        Chave: codigoCliente (mesma dos alunos — visitante que matricular
-        atualiza o mesmo lead em vez de duplicar).
+        codigoCliente → data da visita (ISO), via meta-crm fase HO em janelas
+        de ~30 dias. Visitantes fora da janela ficam sem data (tratados como
+        antigos). ~1 req/mês + páginas do detalhada.
         """
-        log.info("CRM sync: visitantes antigos (base completa)...")
-        stage_r = (self.sb.table("sales_pipeline_stages").select("id")
-                   .eq("name", "Visitantes Antigos").limit(1).execute().data or [])
-        if not stage_r:
+        mapa: dict = {}
+        fim = date.today() + timedelta(days=1)
+        cur = fim - timedelta(days=meses * 30)
+        while cur < fim:
+            prox = min(cur + timedelta(days=30), fim)
+            try:
+                fases = adm.meta_crm(cur, prox)
+                codes = [c for f in fases for t in f.get("tiposMeta", [])
+                         if t.get("faseEnum") == "HO"
+                         for c in t.get("codigosFecharMeta", [])]
+                page = 0
+                while codes:
+                    det = adm.meta_crm_detalhada(codes, page=page)
+                    content = det.get("content", [])
+                    for c in content:
+                        cod, dv = c.get("codigoCliente"), _data_meta_iso(c.get("dataMeta"))
+                        if cod and dv:
+                            # mantém a visita mais RECENTE (repescagens)
+                            atual = mapa.get(int(cod))
+                            if not atual or dv > atual:
+                                mapa[int(cod)] = dv
+                    if len(content) < 100:
+                        break
+                    page += 1
+            except Exception as e:
+                log.warning(f"meta_crm {cur}..{prox}: {e}")
+            cur = prox
+        log.info(f"Mapa de datas de visita: {len(mapa)} visitantes com data")
+        return mapa
+
+    def sync_visitantes_antigos(self, pacto: "PactoClient",
+                                adm: "PactoADMClient") -> int:
+        """
+        Todos os cadastros VISITANTE do Pacto viram leads no kanban da aba
+        Leads: visita nas últimas 24h → fase 'Visitantes 24h'; passou de
+        24h → 'Visitantes Antigos', com metadata.data_visita (ISO) para
+        filtrar por data depois. Fases movidas manualmente pelo time para
+        FORA dessas duas são preservadas. Chave: codigoCliente.
+        """
+        log.info("CRM sync: visitantes (base completa, 24h + antigos)...")
+        stages = (self.sb.table("sales_pipeline_stages").select("id,name,description")
+                  .execute().data or [])
+        antigos_id = next((s["id"] for s in stages if s.get("name") == "Visitantes Antigos"), None)
+        vinte4_id = next((s["id"] for s in stages
+                          if s.get("description") == "VINTE_QUATRO_HORAS"
+                          or s.get("name") == "Visitantes 24h"), None)
+        if not antigos_id:
             log.warning("Fase 'Visitantes Antigos' não encontrada no pipeline")
             return 0
-        stage_id = stage_r[0]["id"]
+
+        mapa_datas = self._mapa_datas_visita(adm)
+        corte_24h = (date.today() - timedelta(days=1)).isoformat()
 
         visitantes = pacto.todos_alunos(situacao="VISITANTE")
         rows = []
@@ -2127,27 +2184,37 @@ class CRMClient:
                 continue
             r = self._lead_row(cod, v, source="pacto_visitante")
             r["status"] = "lead"
+            dv = mapa_datas.get(int(cod))
+            r["metadata"]["data_visita"] = dv
+            r["_stage_alvo"] = (vinte4_id if (dv and dv >= corte_24h and vinte4_id)
+                                else antigos_id)
             rows.append(r)
 
-        # preserva a fase de quem o time já moveu manualmente no kanban
+        # preserva fases movidas manualmente para fora do par 24h/antigos
+        gerenciadas = {antigos_id, vinte4_id, None}
         preservar = set()
         ids = [r["id"] for r in rows]
         for i in range(0, len(ids), 150):
             got = (self.sb.table("leads").select("id,pipeline_stage_id")
                    .in_("id", ids[i:i + 150]).execute().data or [])
             for g in got:
-                if g.get("pipeline_stage_id") and g["pipeline_stage_id"] != stage_id:
+                if g.get("pipeline_stage_id") not in gerenciadas:
                     preservar.add(g["id"])
-        movidos = 0
+        em_24h = em_antigos = 0
         for r in rows:
+            alvo = r.pop("_stage_alvo")
             if r["id"] in preservar:
                 continue
-            r["pipeline_stage_id"] = stage_id
-            movidos += 1
+            r["pipeline_stage_id"] = alvo
+            if alvo == vinte4_id:
+                em_24h += 1
+            else:
+                em_antigos += 1
 
         n = self._upsert_batch(rows)
-        log.info(f"sync_visitantes_antigos: {n}/{len(visitantes)} upserted, "
-                 f"{movidos} na fase Visitantes Antigos, {len(preservar)} fases preservadas")
+        log.info(f"sync_visitantes_antigos: {n}/{len(visitantes)} upserted — "
+                 f"{em_24h} em Visitantes 24h, {em_antigos} em Antigos, "
+                 f"{len(preservar)} fases preservadas")
         return n
 
     def rotacionar_kanban_leads(self) -> int:
@@ -2190,7 +2257,7 @@ class CRMClient:
             # leads de ontem que não converteram saem de "Leads Hoje"
             ("rotacao_kanban_leads", lambda: self.rotacionar_kanban_leads()),
             # base histórica de visitantes → fase "Visitantes Antigos"
-            ("visitantes_antigos",  lambda: self.sync_visitantes_antigos(pacto)),
+            ("visitantes_antigos",  lambda: self.sync_visitantes_antigos(pacto, adm)),
             # depois de alunos_ativos (que reescreve o metadata) pra re-marcar a flag
             ("aniversariantes",    lambda: self.sync_aniversariantes(pacto)),
             ("grupo_risco",        lambda: self.sync_grupo_risco(adm)),
@@ -2568,7 +2635,7 @@ if __name__ == "__main__":
             n = _crm().rotacionar_kanban_leads()
             print(f"\nKanban: {n} lead(s) movido(s) para 'Leads Acumuladas'")
         elif op == "44":
-            n = _crm().sync_visitantes_antigos(pacto)
+            n = _crm().sync_visitantes_antigos(pacto, adm)
             print(f"\nSync visitantes antigos → CRM: {n} leads")
         else:
             print("Opcao invalida.")
