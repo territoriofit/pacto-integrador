@@ -2102,6 +2102,35 @@ class CRMClient:
         log.info(f"Merge webhook↔Pacto: {merged} lead(s) fundido(s)")
         return merged
 
+    def rotacionar_kanban_leads(self) -> int:
+        """
+        Move leads do kanban 'Leads Hoje' criados antes de hoje (horário de
+        Brasília) para 'Leads Acumuladas'. Os leads entram em 'Leads Hoje'
+        pelo webhook do WhatsApp (com origem: anúncio IG/FB, link ou
+        espontâneo) e acumulam no dia seguinte se não forem convertidos.
+        """
+        from datetime import timezone
+        stages = (self.sb.table("sales_pipeline_stages").select("id,name")
+                  .in_("name", ["Leads Hoje", "Leads Acumuladas"])
+                  .execute().data or [])
+        por_nome = {s["name"]: s["id"] for s in stages}
+        hoje_id = por_nome.get("Leads Hoje")
+        acum_id = por_nome.get("Leads Acumuladas")
+        if not hoje_id or not acum_id:
+            log.warning("Etapas 'Leads Hoje'/'Leads Acumuladas' não encontradas")
+            return 0
+        tz_sp = timezone(timedelta(hours=-3))
+        corte = (datetime.now(tz_sp)
+                 .replace(hour=0, minute=0, second=0, microsecond=0)
+                 .astimezone(timezone.utc).isoformat())
+        r = (self.sb.table("leads")
+             .update({"pipeline_stage_id": acum_id})
+             .eq("pipeline_stage_id", hoje_id)
+             .lt("created_at", corte).execute())
+        n = len(r.data or [])
+        log.info(f"Kanban leads: {n} movido(s) 'Leads Hoje' → 'Leads Acumuladas'")
+        return n
+
     def sincronizar_diario(self, pacto: "PactoClient", adm: "PactoADMClient") -> dict:
         """Sync completo — rodar uma vez ao dia."""
         resultado = {}
@@ -2110,6 +2139,8 @@ class CRMClient:
             # logo após alunos_ativos: quem conversou no WhatsApp antes de
             # virar aluno ganha lead Pacto hoje — funde o lead do webhook nele
             ("merge_webhook_pacto", lambda: self.merge_leads_webhook_pacto()),
+            # leads de ontem que não converteram saem de "Leads Hoje"
+            ("rotacao_kanban_leads", lambda: self.rotacionar_kanban_leads()),
             # depois de alunos_ativos (que reescreve o metadata) pra re-marcar a flag
             ("aniversariantes",    lambda: self.sync_aniversariantes(pacto)),
             ("grupo_risco",        lambda: self.sync_grupo_risco(adm)),
@@ -2246,6 +2277,7 @@ if __name__ == "__main__":
  40 - Sync: ultimo acesso catraca -> leads CRM (metadata, ~15min)
  41 - Sync: aniversariantes do mes -> leads CRM (metadata)
  42 - Merge: leads do webhook WhatsApp -> cadastro Pacto (mesmo fone)
+ 43 - Kanban: mover 'Leads Hoje' de ontem -> 'Leads Acumuladas'
   0 - Sair
 """
 
@@ -2481,5 +2513,8 @@ if __name__ == "__main__":
         elif op == "42":
             n = _crm().merge_leads_webhook_pacto()
             print(f"\nMerge leads webhook ↔ Pacto: {n} lead(s) fundido(s)")
+        elif op == "43":
+            n = _crm().rotacionar_kanban_leads()
+            print(f"\nKanban: {n} lead(s) movido(s) para 'Leads Acumuladas'")
         else:
             print("Opcao invalida.")
