@@ -2102,6 +2102,54 @@ class CRMClient:
         log.info(f"Merge webhook↔Pacto: {merged} lead(s) fundido(s)")
         return merged
 
+    def sync_visitantes_antigos(self, pacto: "PactoClient") -> int:
+        """
+        Todos os cadastros com situação VISITANTE no Pacto (~10 mil, base
+        histórica) viram leads na fase 'Visitantes Antigos' do pipeline
+        (aba Leads). Quem já foi movido manualmente para outra fase do
+        kanban mantém a fase — o sync não briga com o trabalho do time.
+        Chave: codigoCliente (mesma dos alunos — visitante que matricular
+        atualiza o mesmo lead em vez de duplicar).
+        """
+        log.info("CRM sync: visitantes antigos (base completa)...")
+        stage_r = (self.sb.table("sales_pipeline_stages").select("id")
+                   .eq("name", "Visitantes Antigos").limit(1).execute().data or [])
+        if not stage_r:
+            log.warning("Fase 'Visitantes Antigos' não encontrada no pipeline")
+            return 0
+        stage_id = stage_r[0]["id"]
+
+        visitantes = pacto.todos_alunos(situacao="VISITANTE")
+        rows = []
+        for v in visitantes:
+            cod = v.get("codigoCliente")
+            if not cod:
+                continue
+            r = self._lead_row(cod, v, source="pacto_visitante")
+            r["status"] = "lead"
+            rows.append(r)
+
+        # preserva a fase de quem o time já moveu manualmente no kanban
+        preservar = set()
+        ids = [r["id"] for r in rows]
+        for i in range(0, len(ids), 150):
+            got = (self.sb.table("leads").select("id,pipeline_stage_id")
+                   .in_("id", ids[i:i + 150]).execute().data or [])
+            for g in got:
+                if g.get("pipeline_stage_id") and g["pipeline_stage_id"] != stage_id:
+                    preservar.add(g["id"])
+        movidos = 0
+        for r in rows:
+            if r["id"] in preservar:
+                continue
+            r["pipeline_stage_id"] = stage_id
+            movidos += 1
+
+        n = self._upsert_batch(rows)
+        log.info(f"sync_visitantes_antigos: {n}/{len(visitantes)} upserted, "
+                 f"{movidos} na fase Visitantes Antigos, {len(preservar)} fases preservadas")
+        return n
+
     def rotacionar_kanban_leads(self) -> int:
         """
         Move leads do kanban 'Leads Hoje' criados antes de hoje (horário de
@@ -2141,6 +2189,8 @@ class CRMClient:
             ("merge_webhook_pacto", lambda: self.merge_leads_webhook_pacto()),
             # leads de ontem que não converteram saem de "Leads Hoje"
             ("rotacao_kanban_leads", lambda: self.rotacionar_kanban_leads()),
+            # base histórica de visitantes → fase "Visitantes Antigos"
+            ("visitantes_antigos",  lambda: self.sync_visitantes_antigos(pacto)),
             # depois de alunos_ativos (que reescreve o metadata) pra re-marcar a flag
             ("aniversariantes",    lambda: self.sync_aniversariantes(pacto)),
             ("grupo_risco",        lambda: self.sync_grupo_risco(adm)),
@@ -2278,6 +2328,7 @@ if __name__ == "__main__":
  41 - Sync: aniversariantes do mes -> leads CRM (metadata)
  42 - Merge: leads do webhook WhatsApp -> cadastro Pacto (mesmo fone)
  43 - Kanban: mover 'Leads Hoje' de ontem -> 'Leads Acumuladas'
+ 44 - Sync: visitantes antigos (base completa) -> fase Visitantes Antigos
   0 - Sair
 """
 
@@ -2516,5 +2567,8 @@ if __name__ == "__main__":
         elif op == "43":
             n = _crm().rotacionar_kanban_leads()
             print(f"\nKanban: {n} lead(s) movido(s) para 'Leads Acumuladas'")
+        elif op == "44":
+            n = _crm().sync_visitantes_antigos(pacto)
+            print(f"\nSync visitantes antigos → CRM: {n} leads")
         else:
             print("Opcao invalida.")
