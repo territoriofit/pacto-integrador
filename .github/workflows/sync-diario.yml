@@ -1,8 +1,10 @@
 # Sync diário Pacto → CRM Território Fit
 #
-# Roda às 05:30 UTC (02:30 BRT): mesmo com atraso do scheduler do Actions
-# (~15-30 min em pico) + ~50 min de scan completo, termina bem antes das
-# 05:00 BRT, quando a academia abre.
+# Roda às 04:12 UTC (01:12 BRT). Minuto/hora fora de pico de propósito:
+# em 2026-07-03 o cron "30 5" só disparou às 12:29 UTC (~7h de atraso do
+# scheduler do Actions — :00/:30 são os horários mais congestionados).
+# Com ~50 min de scan + folga pra atraso, termina antes das 05:00 BRT,
+# quando a academia abre.
 #
 # Consumo: ~45-55 min/dia ≈ 1.400-1.700 min/mês (cota Free: 2.000 min/mês
 # em repo privado — acompanhar em Settings > Billing).
@@ -15,7 +17,7 @@ name: Sync diário Pacto → CRM
 
 on:
   schedule:
-    - cron: "30 5 * * *"
+    - cron: "12 4 * * *"
   workflow_dispatch: {}
 
 concurrency:
