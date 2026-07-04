@@ -1535,6 +1535,76 @@ class CRMClient:
         log.info(f"sync_renovacao_mes_atual: {n}/{len(rows)} vencendo em {inicio:%m/%Y}")
         return n
 
+    def sync_renovacoes_status(self) -> dict:
+        """
+        Detecta renovacoes lancadas direto no Pacto e marca 'renovado' na
+        pagina de Renovacao do CRM (tabela renovacoes).
+
+        Logica: sync_alunos_ativos ja gravou hoje o vencimento do contrato
+        ATUAL de cada aluno em leads.metadata.vencimento. Se esse vencimento
+        ficou mais de 15 dias DEPOIS da previsao registrada na renovacao, um
+        contrato novo foi lancado no Pacto -> renovou. A margem de 15 dias
+        evita falso positivo por diferenca de poucos dias entre a previsao
+        (vinda da planilha) e o vencimento real no Pacto.
+
+        So promove status (pendente/negociando/aguardando_pagamento ->
+        renovado); nunca rebaixa nem toca em nao_renova (controle manual).
+        """
+        log.info("CRM sync: renovacoes (deteccao de renovacao no Pacto)...")
+        MARGEM_DIAS = 15
+
+        r = self.sb.table("renovacoes").select(
+            "id,tenant_id,nome,previsao,lead_id,mes_referencia,status"
+        ).not_.in_("status", ["renovado", "nao_renova"]).execute()
+        abertas = [x for x in (r.data or []) if x.get("lead_id") and x.get("previsao")]
+        if not abertas:
+            log.info("sync_renovacoes_status: nenhuma renovacao aberta com lead")
+            return {"abertas": 0, "renovadas": 0}
+
+        # vencimento atual dos leads (escrito hoje pelo sync_alunos_ativos)
+        venc_por_lead: dict[str, str] = {}
+        lead_ids = list({x["lead_id"] for x in abertas})
+        for i in range(0, len(lead_ids), 200):
+            rl = self.sb.table("leads").select("id,metadata").in_(
+                "id", lead_ids[i:i + 200]
+            ).execute()
+            for ld in rl.data or []:
+                v = (ld.get("metadata") or {}).get("vencimento")
+                if v:
+                    venc_por_lead[ld["id"]] = v
+
+        renovadas = 0
+        for ren in abertas:
+            venc_atual = venc_por_lead.get(ren["lead_id"])
+            if not venc_atual:
+                continue
+            try:
+                d_venc = date.fromisoformat(venc_atual)
+                d_prev = date.fromisoformat(ren["previsao"])
+            except ValueError:
+                continue
+            if (d_venc - d_prev).days <= MARGEM_DIAS:
+                continue
+            # contrato novo lancado no Pacto -> marca renovado + timeline
+            self.sb.table("renovacoes").update(
+                {"status": "renovado"}
+            ).eq("id", ren["id"]).execute()
+            self.sb.table("renovacao_eventos").insert({
+                "tenant_id":      ren["tenant_id"],
+                "renovacao_id":   ren["id"],
+                "tipo":           "status",
+                "descricao":      (f"Renovação detectada no Pacto "
+                                   f"(novo vencimento: {d_venc:%d/%m/%Y})"),
+                "registrado_por": "Sync Pacto",
+            }).execute()
+            renovadas += 1
+            log.info(f"  renovado: {ren['nome']} ({ren['mes_referencia']}) "
+                     f"venc {ren['previsao']} -> {venc_atual}")
+
+        log.info(f"sync_renovacoes_status: {renovadas} renovacoes detectadas "
+                 f"de {len(abertas)} abertas")
+        return {"abertas": len(abertas), "renovadas": renovadas}
+
     def sync_inadimplentes(self, pacto: "PactoClient", adm: "PactoADMClient") -> int:
         """
         Upsert de inadimplentes (contrato vencido) com alerta no metadata +
@@ -2264,6 +2334,9 @@ class CRMClient:
             ("pipeline_stages",    lambda: self.sync_pipeline_stages_from_pacto(adm)),
             ("deals_financeiro",   lambda: self.sync_deals_financeiro(pacto, adm)),
             ("renovacao_mes_atual", lambda: self.sync_renovacao_mes_atual(pacto)),
+            # depois de alunos_ativos (metadata.vencimento fresco): marca
+            # 'renovado' na pagina Renovacao quem lancou contrato novo no Pacto
+            ("renovacoes_status",  lambda: self.sync_renovacoes_status()),
             ("inadimplentes",      lambda: self.sync_inadimplentes(pacto, adm)),
             # base completa (~2000, ~45min): roda de madrugada junto do diario;
             # achou 22% mais parcelas que o subset de risco (medido 2026-07-02)
@@ -2396,6 +2469,7 @@ if __name__ == "__main__":
  42 - Merge: leads do webhook WhatsApp -> cadastro Pacto (mesmo fone)
  43 - Kanban: mover 'Leads Hoje' de ontem -> 'Leads Acumuladas'
  44 - Sync: visitantes antigos (base completa) -> fase Visitantes Antigos
+ 45 - Sync: detectar renovacoes lancadas no Pacto -> pagina Renovacao
   0 - Sair
 """
 
@@ -2637,5 +2711,8 @@ if __name__ == "__main__":
         elif op == "44":
             n = _crm().sync_visitantes_antigos(pacto, adm)
             print(f"\nSync visitantes antigos → CRM: {n} leads")
+        elif op == "45":
+            r = _crm().sync_renovacoes_status()
+            print(f"\nRenovações detectadas no Pacto: {r['renovadas']} de {r['abertas']} abertas")
         else:
             print("Opcao invalida.")
