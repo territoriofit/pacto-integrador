@@ -2159,7 +2159,8 @@ class CRMClient:
                             "matricula":      v.get("matricula"),
                             # detalhada devolve codigo de 2 letras: VI/AT/IN
                             "situacao_pacto": (v.get("situacao") or "").upper(),
-                            "consultor":      v.get("consultora") or v.get("nomeColaborador"),
+                            # Title Case: unifica 'ANDRÉ TREVIZAN' e 'André Trevizan'
+                            "consultor":      ((v.get("consultora") or v.get("nomeColaborador") or "").title() or None),
                             "data_visita":    dv,
                         }
             cur = prox
