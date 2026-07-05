@@ -2095,11 +2095,177 @@ class CRMClient:
 
     # -- Orquestradores por frequência -----------------------------------------
 
+    def sync_visitantes_bv(self, adm: "PactoADMClient", dias: int = 45) -> dict:
+        """
+        Relatorio 'Conversao de Vendas - BV' por mes (tabela visitantes_bv).
+
+        Cada visitante da fase HO do meta-crm vira uma linha no mes da visita.
+        A cada run a situacao acompanha o Pacto: 'Visitante' -> 'Ativo' quando
+        um plano e lancado (nunca rebaixa). tipo_bv e derivado UMA vez, no
+        primeiro insert, e nunca recalculado:
+          - lead inexistente ou ainda visitante/lead  -> Matricula (cadastro novo)
+          - lead ja era INATIVO (ex-aluno que voltou) -> Rematricula
+          - lead ja cliente/inadimplente (converteu antes do 1o sync): decide
+            pela matricula — numero muito abaixo do max da janela = cadastro
+            antigo reaproveitado -> Rematricula; senao Matricula.
+        Horario roda com dias=2 (novos visitantes); diario com dias=45
+        (captura conversoes de quem visitou semanas atras).
+        """
+        log.info(f"CRM sync: visitantes BV (janela {dias}d)...")
+        fim = date.today() + timedelta(days=1)
+        ini = fim - timedelta(days=dias)
+
+        # 1. coleta fase HO em janelas de <=30 dias; 1 linha por (cliente, mes)
+        vistos: dict[tuple, dict] = {}
+        cur = ini
+        while cur < fim:
+            prox = min(cur + timedelta(days=30), fim)
+            codes = []
+            for tentativa in (1, 2):  # gateway da 504 esporadico
+                try:
+                    fases = adm.meta_crm(cur, prox)
+                    codes = [c for f in fases for t in f.get("tiposMeta", [])
+                             if t.get("faseEnum") == "HO"
+                             for c in t.get("codigosFecharMeta", [])]
+                    break
+                except Exception as e:
+                    log.warning(f"meta_crm {cur}..{prox} (tentativa {tentativa}): {e}")
+            # ATENCAO: o gateway trunca em 30 linhas e IGNORA page/size
+            # (page=1 repete o conteudo da page=0). Fatiar os codigos em
+            # lotes pequenos e a unica forma de ler tudo.
+            LOTE = 20
+            for j in range(0, len(codes), LOTE):
+                try:
+                    det = adm.meta_crm_detalhada(codes[j:j+LOTE])
+                except Exception as e:
+                    log.warning(f"meta_crm_detalhada lote {j}: {e} — retry")
+                    try:
+                        det = adm.meta_crm_detalhada(codes[j:j+LOTE])
+                    except Exception as e2:
+                        log.warning(f"meta_crm_detalhada lote {j} falhou: {e2}")
+                        continue
+                for v in det.get("content", []):
+                    cod, dm = v.get("codigoCliente"), _data_meta_iso(v.get("dataMeta"))
+                    if not cod or not dm:
+                        continue
+                    # dataMeta = dia do CONTATO de boas-vindas; a visita foi na vespera
+                    dv = (date.fromisoformat(dm) - timedelta(days=1)).isoformat()
+                    chave = (int(cod), dv[:7])  # mes da visita
+                    atual = vistos.get(chave)
+                    if not atual or dv > atual["data_visita"]:
+                        vistos[chave] = {
+                            "codigo_cliente": int(cod),
+                            "nome":           v.get("nome"),
+                            "matricula":      v.get("matricula"),
+                            # detalhada devolve codigo de 2 letras: VI/AT/IN
+                            "situacao_pacto": (v.get("situacao") or "").upper(),
+                            "consultor":      v.get("consultora") or v.get("nomeColaborador"),
+                            "data_visita":    dv,
+                        }
+            cur = prox
+        if not vistos:
+            log.info("sync_visitantes_bv: nenhum visitante na janela")
+            return {"visitantes": 0, "novos": 0, "convertidos": 0}
+
+        # 2. linhas ja existentes na janela
+        meses = sorted({m for _, m in vistos})
+        r = self.sb.table("visitantes_bv").select(
+            "id,codigo_cliente,mes_referencia,situacao,lead_id"
+        ).in_("mes_referencia", meses).execute()
+        existentes = {(x["codigo_cliente"], x["mes_referencia"]): x for x in (r.data or [])}
+
+        # 3. leads correspondentes (status decide tipo_bv; id vira FK)
+        cods = sorted({c for c, _ in vistos})
+        lead_por_cod: dict[int, dict] = {}
+        BATCH = 80
+        lids = {(_pacto_lead_id(c, self.tenant_id)): c for c in cods}
+        todas = list(lids.keys())
+        for i in range(0, len(todas), BATCH):
+            rr = self.sb.table("leads").select("id,status").in_("id", todas[i:i+BATCH]).execute()
+            for row in (rr.data or []):
+                lead_por_cod[lids[row["id"]]] = row
+
+        matriculas_num = [int(v["matricula"]) for v in vistos.values()
+                          if str(v.get("matricula") or "").isdigit()]
+        max_matricula = max(matriculas_num) if matriculas_num else 0
+
+        def _tipo_bv(v: dict) -> str:
+            lead = lead_por_cod.get(v["codigo_cliente"])
+            status = (lead or {}).get("status")
+            if not lead or status in ("lead", "visitante"):
+                return "Matricula"
+            if status == "inativo":
+                return "Rematricula"
+            # cliente/inadimplente: converteu antes do 1o sync — decide pela matricula
+            m = str(v.get("matricula") or "")
+            if m.isdigit() and max_matricula and (max_matricula - int(m)) > 150:
+                return "Rematricula"
+            return "Matricula"
+
+        agora = datetime.now().isoformat()
+        novos, convertidos = [], []
+        for (cod, mes), v in vistos.items():
+            lead = lead_por_cod.get(cod)
+            # convertido = plano lancado no Pacto: a meta diz 'AT' OU o lead ja
+            # e cliente na nossa base (cobre metas fechadas, que somem da HO)
+            convertido = (v["situacao_pacto"] == "AT"
+                          or (lead or {}).get("status") in ("cliente", "inadimplente"))
+            ex = existentes.get((cod, mes))
+            if ex is None:
+                novos.append({
+                    "tenant_id":      self.tenant_id,
+                    "lead_id":        lead["id"] if lead else None,
+                    "codigo_cliente": cod,
+                    "nome":           v["nome"],
+                    "matricula":      v["matricula"],
+                    "situacao":       "Ativo" if convertido else "Visitante",
+                    "tipo_bv":        _tipo_bv(v),
+                    "consultor":      v["consultor"],
+                    "data_visita":    v["data_visita"],
+                    "mes_referencia": mes,
+                    "convertido_em":  agora if convertido else None,
+                })
+            elif convertido and ex["situacao"] != "Ativo":
+                convertidos.append({"id": ex["id"], "lead_id": ex["lead_id"] or (lead or {}).get("id")})
+
+        for i in range(0, len(novos), 200):
+            self.sb.table("visitantes_bv").insert(novos[i:i+200]).execute()
+        for c in convertidos:
+            self.sb.table("visitantes_bv").update({
+                "situacao": "Ativo", "convertido_em": agora, "lead_id": c["lead_id"],
+            }).eq("id", c["id"]).execute()
+
+        # 4. conversoes fora da janela da meta (meta fechada some da fase HO):
+        #    qualquer linha ainda 'Visitante' cujo lead virou cliente e promovida
+        r = self.sb.table("visitantes_bv").select(
+            "id,codigo_cliente").eq("situacao", "Visitante").execute()
+        pendentes = r.data or []
+        extra = 0
+        for i in range(0, len(pendentes), BATCH):
+            lote = pendentes[i:i+BATCH]
+            lids2 = {_pacto_lead_id(p["codigo_cliente"], self.tenant_id): p for p in lote}
+            rr = self.sb.table("leads").select("id,status").in_(
+                "id", list(lids2.keys())).execute()
+            for row in (rr.data or []):
+                if row["status"] in ("cliente", "inadimplente"):
+                    self.sb.table("visitantes_bv").update({
+                        "situacao": "Ativo", "convertido_em": agora,
+                        "lead_id": row["id"],
+                    }).eq("id", lids2[row["id"]]["id"]).execute()
+                    extra += 1
+
+        log.info(f"sync_visitantes_bv: {len(vistos)} na janela, "
+                 f"{len(novos)} novos, {len(convertidos) + extra} conversoes")
+        return {"visitantes": len(vistos), "novos": len(novos),
+                "convertidos": len(convertidos) + extra}
+
     def sincronizar_leads(self, pacto: "PactoClient", adm: "PactoADMClient") -> dict:
         """Sync rápido de leads — rodar a cada hora."""
         resultado = {}
         for nome, fn in [
             ("visitantes_hoje", lambda: self.sync_visitantes(adm)),
+            # relatorio BV: novos visitantes entram na hora (janela curta)
+            ("visitantes_bv_hoje", lambda: self.sync_visitantes_bv(adm, dias=2)),
             ("meta_lead_ads",   lambda: self.sync_meta_lead_ads()),
         ]:
             try:
@@ -2203,20 +2369,17 @@ class CRMClient:
                 codes = [c for f in fases for t in f.get("tiposMeta", [])
                          if t.get("faseEnum") == "HO"
                          for c in t.get("codigosFecharMeta", [])]
-                page = 0
-                while codes:
-                    det = adm.meta_crm_detalhada(codes, page=page)
-                    content = det.get("content", [])
-                    for c in content:
+                # gateway trunca em 30 linhas e IGNORA page/size — fatiar codigos
+                LOTE = 20
+                for j in range(0, len(codes), LOTE):
+                    det = adm.meta_crm_detalhada(codes[j:j+LOTE])
+                    for c in det.get("content", []):
                         cod, dv = c.get("codigoCliente"), _data_meta_iso(c.get("dataMeta"))
                         if cod and dv:
                             # mantém a visita mais RECENTE (repescagens)
                             atual = mapa.get(int(cod))
                             if not atual or dv > atual:
                                 mapa[int(cod)] = dv
-                    if len(content) < 100:
-                        break
-                    page += 1
             except Exception as e:
                 log.warning(f"meta_crm {cur}..{prox}: {e}")
             cur = prox
@@ -2328,6 +2491,8 @@ class CRMClient:
             ("rotacao_kanban_leads", lambda: self.rotacionar_kanban_leads()),
             # base histórica de visitantes → fase "Visitantes Antigos"
             ("visitantes_antigos",  lambda: self.sync_visitantes_antigos(pacto, adm)),
+            # relatorio BV: rescan 45d captura conversoes Visitante -> Ativo
+            ("visitantes_bv",      lambda: self.sync_visitantes_bv(adm, dias=45)),
             # depois de alunos_ativos (que reescreve o metadata) pra re-marcar a flag
             ("aniversariantes",    lambda: self.sync_aniversariantes(pacto)),
             ("grupo_risco",        lambda: self.sync_grupo_risco(adm)),
@@ -2470,6 +2635,7 @@ if __name__ == "__main__":
  43 - Kanban: mover 'Leads Hoje' de ontem -> 'Leads Acumuladas'
  44 - Sync: visitantes antigos (base completa) -> fase Visitantes Antigos
  45 - Sync: detectar renovacoes lancadas no Pacto -> pagina Renovacao
+ 46 - Sync: visitantes BV (conversao de vendas) -> tabela visitantes_bv
   0 - Sair
 """
 
@@ -2714,5 +2880,9 @@ if __name__ == "__main__":
         elif op == "45":
             r = _crm().sync_renovacoes_status()
             print(f"\nRenovações detectadas no Pacto: {r['renovadas']} de {r['abertas']} abertas")
+        elif op == "46":
+            dias = input("Janela em dias [45]: ").strip()
+            r = _crm().sync_visitantes_bv(adm, dias=int(dias) if dias else 45)
+            print(f"\nVisitantes BV: {r}")
         else:
             print("Opcao invalida.")
