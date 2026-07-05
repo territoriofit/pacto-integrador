@@ -2229,8 +2229,13 @@ class CRMClient:
             elif convertido and ex["situacao"] != "Ativo":
                 convertidos.append({"id": ex["id"], "lead_id": ex["lead_id"] or (lead or {}).get("id")})
 
+        # upsert ignorando duplicatas: horario (nuvem) e diario podem se cruzar
         for i in range(0, len(novos), 200):
-            self.sb.table("visitantes_bv").insert(novos[i:i+200]).execute()
+            self.sb.table("visitantes_bv").upsert(
+                novos[i:i+200],
+                on_conflict="tenant_id,codigo_cliente,mes_referencia",
+                ignore_duplicates=True,
+            ).execute()
         for c in convertidos:
             self.sb.table("visitantes_bv").update({
                 "situacao": "Ativo", "convertido_em": agora, "lead_id": c["lead_id"],
@@ -2566,6 +2571,11 @@ if __name__ == "__main__":
     # Modos nao-interativos (GitHub Actions / Task Scheduler):
     #   python agente_integrador_pacto.py --scan-parcelas-completo  (so parcelas, base inteira)
     #   python agente_integrador_pacto.py --sync-diario             (sincronizar_tudo)
+    #   python agente_integrador_pacto.py --sync-horario            (sincronizar_leads)
+    if "--sync-horario" in sys.argv:
+        r = CRMClient().sincronizar_leads(pacto, adm)
+        print(json.dumps(r, ensure_ascii=False, indent=2, default=str))
+        raise SystemExit(1 if any(isinstance(v, str) and v.startswith("erro") for v in r.values()) else 0)
     if "--scan-parcelas-completo" in sys.argv:
         r = CRMClient().sync_parcelas_atrasadas(pacto, adm, todos_ativos=True)
         print(json.dumps(r, ensure_ascii=False, indent=2))
