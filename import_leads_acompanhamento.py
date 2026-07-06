@@ -24,10 +24,13 @@ XLSX_PADRAO = r"C:\Users\Acer\OneDrive\Desktop\LISTAS CRM\leads.xlsx"
 MESES_PT = {"jan": 1, "fev": 2, "mar": 3, "abr": 4, "mai": 5, "jun": 6,
             "jul": 7, "ago": 8, "set": 9, "out": 10, "nov": 11, "dez": 12}
 
+# "LY" aparece como consultora propria no fechamento da planilha (linha separada
+# da KELYTTA) — nao fundir com Kellyta.
 CONSULTORA_CANONICA = {
     "rai": "Raiane", "raiane": "Raiane",
     "nathy": "Nathalia", "nathalia": "Nathalia", "nahy": "Nathalia",
-    "kelytta": "Kellyta", "kellyta": "Kellyta", "kelly": "Kellyta", "ly": "Kellyta",
+    "kelytta": "Kellyta", "kellyta": "Kellyta", "kelly": "Kellyta",
+    "ly": "Ly",
 }
 
 
@@ -82,9 +85,12 @@ def parse_data(v, ano: int):
 def importar(xlsx: str, force: bool = False):
     crm = CRMClient()
     wb = openpyxl.load_workbook(xlsx, data_only=True)
-    ws = wb.worksheets[0]
     ano = date.today().year
+    for ws in wb.worksheets:
+        _importar_aba(crm, ws, ano, force)
 
+
+def _importar_aba(crm, ws, ano: int, force: bool):
     # header: linha com 'Nome' na coluna D
     header_row = None
     for i, row in enumerate(ws.iter_rows(min_row=1, max_row=20, values_only=True), 1):
@@ -92,14 +98,17 @@ def importar(xlsx: str, force: bool = False):
             header_row = i
             break
     if not header_row:
-        print("header nao encontrado")
+        print(f"[{ws.title}] header nao encontrado — pulando")
         return
 
     brutas = [row for row in ws.iter_rows(min_row=header_row + 1, max_row=ws.max_row,
                                           values_only=True)
               if row[3] or row[4]]  # nome OU numero (planilha tem linhas sem nome)
+    if not brutas:
+        print(f"[{ws.title}] sem linhas — pulando")
+        return
 
-    # mes predominante da coluna Data define o mes_referencia da planilha
+    # mes predominante da coluna Data define o mes_referencia da aba
     meses = Counter(d.month for d in (parse_data(r[1], ano) for r in brutas) if d)
     mes_num = meses.most_common(1)[0][0]
     mes_ref = f"{ano}-{mes_num:02d}"
@@ -108,11 +117,11 @@ def importar(xlsx: str, force: bool = False):
         .eq("mes_referencia", mes_ref).eq("origem", "planilha").limit(1).execute()
     if (existentes.count or 0) > 0:
         if not force:
-            print(f"{mes_ref} ja importado ({existentes.count}+ linhas) — use --force")
+            print(f"[{ws.title}] {mes_ref} ja importado — pulando (use --force)")
             return
         crm.sb.table("leads_acompanhamento").delete() \
             .eq("mes_referencia", mes_ref).eq("origem", "planilha").execute()
-        print(f"{mes_ref} reimportando (--force)")
+        print(f"[{ws.title}] {mes_ref} reimportando (--force)")
 
     linhas = []
     for row in brutas:
@@ -140,6 +149,19 @@ def importar(xlsx: str, force: bool = False):
             "tenant_id":      crm.tenant_id,
         })
 
+    # dedupe contra linhas ja existentes no mes (ex.: webhook whatsapp_auto
+    # ja registrou o lead) — telefone com final igual = mesma pessoa
+    r = crm.sb.table("leads_acompanhamento").select("telefone") \
+        .eq("mes_referencia", mes_ref).execute()
+    tels_existentes = {(x.get("telefone") or "")[-8:] for x in (r.data or [])
+                       if x.get("telefone") and len(x["telefone"]) >= 8}
+    antes = len(linhas)
+    linhas = [ln for ln in linhas
+              if not (ln["telefone"] and len(ln["telefone"]) >= 8
+                      and ln["telefone"][-8:] in tels_existentes)]
+    if antes != len(linhas):
+        print(f"[{ws.title}] {antes - len(linhas)} linha(s) puladas (telefone ja no mes)")
+
     # vincula lead pelo final do telefone (8 digitos); ambiguo = sem vinculo
     for ln in linhas:
         tel = ln["telefone"]
@@ -152,7 +174,7 @@ def importar(xlsx: str, force: bool = False):
     for i in range(0, len(linhas), 100):
         crm.sb.table("leads_acompanhamento").insert(linhas[i:i + 100]).execute()
     com_lead = sum(1 for x in linhas if x.get("lead_id"))
-    print(f"{mes_ref}: {len(linhas)} leads importados ({com_lead} vinculados a lead)")
+    print(f"[{ws.title}] {mes_ref}: {len(linhas)} leads importados ({com_lead} vinculados a lead)")
 
 
 if __name__ == "__main__":
