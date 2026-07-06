@@ -28,7 +28,7 @@ MESES_PT = {"jan": 1, "fev": 2, "mar": 3, "abr": 4, "mai": 5, "jun": 6,
 # da KELYTTA) — nao fundir com Kellyta.
 CONSULTORA_CANONICA = {
     "rai": "Raiane", "raiane": "Raiane",
-    "nathy": "Nathalia", "nathalia": "Nathalia", "nahy": "Nathalia",
+    "nathy": "Nathalia", "nathalia": "Nathalia", "nahy": "Nathalia", "ntahy": "Nathalia",
     "kelytta": "Kellyta", "kellyta": "Kellyta", "kelly": "Kellyta",
     "ly": "Ly",
 }
