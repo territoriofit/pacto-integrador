@@ -27,7 +27,9 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 100
+    # 2026-07-06: run estourou os 100 min (1h19 até chegar no ultimo_acesso,
+    # que precisa de ~25 min pra base de ~2000) e foi cancelado no meio.
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
 
