@@ -24,13 +24,11 @@ XLSX_PADRAO = r"C:\Users\Acer\OneDrive\Desktop\LISTAS CRM\leads.xlsx"
 MESES_PT = {"jan": 1, "fev": 2, "mar": 3, "abr": 4, "mai": 5, "jun": 6,
             "jul": 7, "ago": 8, "set": 9, "out": 10, "nov": 11, "dez": 12}
 
-# "LY" aparece como consultora propria no fechamento da planilha (linha separada
-# da KELYTTA) — nao fundir com Kellyta.
 CONSULTORA_CANONICA = {
     "rai": "Raiane", "raiane": "Raiane",
     "nathy": "Nathalia", "nathalia": "Nathalia", "nahy": "Nathalia", "ntahy": "Nathalia",
     "kelytta": "Kellyta", "kellyta": "Kellyta", "kelly": "Kellyta",
-    "ly": "Ly",
+    "ly": "Lyandra", "lyandra": "Lyandra",
 }
 
 

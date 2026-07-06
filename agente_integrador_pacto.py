@@ -1748,7 +1748,8 @@ class CRMClient:
         # nomes canonicos iguais aos usados em renovacoes/agendamentos
         CANON = {"kelytta": "Kellyta", "kellyta": "Kellyta",
                  "nathalia": "Nathalia", "nathy": "Nathalia",
-                 "raiane": "Raiane", "rai": "Raiane"}
+                 "raiane": "Raiane", "rai": "Raiane",
+                 "ly": "Lyandra", "lyandra": "Lyandra"}
         n = falhas = 0
         for ld in alvo.values():
             meta = ld.get("metadata") or {}

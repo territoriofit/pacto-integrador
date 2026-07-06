@@ -28,7 +28,8 @@ MES_POR_ABA = {
 CONSULTOR_CANONICO = {
     "rai": "Raiane", "raiane": "Raiane",
     "nathy": "Nathalia", "nahy": "Nathalia", "nathalia": "Nathalia",
-    "kelytta": "Kellyta", "kellyta": "Kellyta", "ly": "Kellyta",
+    "kelytta": "Kellyta", "kellyta": "Kellyta",
+    "ly": "Lyandra", "lyandra": "Lyandra",
 }
 
 # nomes canonicos das modalidades (mesma lista do frontend: MODALIDADES)
