@@ -2658,6 +2658,125 @@ class CRMClient:
         log.info(f"Kanban leads: {n} movido(s) 'Leads Hoje' → 'Leads Acumuladas'")
         return n
 
+    # nomes canonicos das consultoras (iguais aos de renovacoes/agendamentos)
+    _CONSULTORA_CANON = {"kelytta": "Kellyta", "kellyta": "Kellyta",
+                         "nathalia": "Nathalia", "nathy": "Nathalia",
+                         "raiane": "Raiane", "rai": "Raiane",
+                         "ly": "Lyandra", "lyandra": "Lyandra"}
+
+    def sync_vendas_pacto(self, adm: "PactoADMClient", backfill_desde: str | None = None,
+                          max_misses: int = 8) -> dict:
+        """
+        Tabela vendas_pacto: 1 linha por contrato lançado no Pacto (matrícula,
+        rematrícula ou renovação) com valor, plano, duração em meses e a
+        consultora do lançamento (responsavelLancamento). Alimenta a página
+        Ranking de Vendas.
+
+        Códigos de contrato são sequenciais: varre para FRENTE a partir do
+        maior código já gravado (para com max_misses buracos seguidos) e, se
+        backfill_desde ('YYYY-MM-DD') for dado, também para TRÁS a partir do
+        menor código até passar dessa data. Sem linha nenhuma na tabela, o
+        seed vem do mapa de matrículas do BI /v2-conversao-venda de hoje.
+        """
+        from datetime import timezone
+        tz_sp = timezone(timedelta(hours=-3))
+        log.info("CRM sync: vendas Pacto (contratos)...")
+
+        def _contrato(cod: int) -> dict | None:
+            r = adm._gw("GET", f"/contratos/{cod}")
+            c = r.get("content") if isinstance(r, dict) else None
+            return c if isinstance(c, dict) and c.get("codigo") else None
+
+        def _row(c: dict) -> dict:
+            dt = datetime.fromtimestamp((c.get("dataLancamento") or 0) / 1000, tz=tz_sp)
+            vig_de = c.get("vigenciaDe")
+            vig_ate = c.get("vigenciaAteAjustada") or c.get("vigenciaAte")
+            dur = None
+            if vig_de and vig_ate:
+                dur = max(1, round((vig_ate - vig_de) / 86_400_000 / 30.44))
+            resp = (c.get("responsavelLancamento") or "").strip()
+            primeiro = resp.split()[0].lower() if resp else ""
+            consultora = self._CONSULTORA_CANON.get(primeiro,
+                                                    primeiro.title() or None)
+            return {
+                "tenant_id": self.tenant_id,
+                "codigo_contrato": c["codigo"],
+                "codigo_pessoa": c.get("pessoa"),
+                "nome_cliente": (c.get("pessoaDTO") or {}).get("nome"),
+                "tipo": c.get("tipo"),
+                "contrato_base": c.get("contratoBaseadoRenovacao") or 0,
+                "valor": c.get("valor"),
+                "descricao_plano": c.get("descricaoPlano"),
+                "vigencia_de": (datetime.fromtimestamp(vig_de / 1000, tz=tz_sp)
+                                .date().isoformat() if vig_de else None),
+                "vigencia_ate": (datetime.fromtimestamp(vig_ate / 1000, tz=tz_sp)
+                                 .date().isoformat() if vig_ate else None),
+                "duracao_meses": dur,
+                "consultora": consultora,
+                "responsavel_raw": resp or None,
+                "data_lancamento": dt.astimezone(timezone.utc).isoformat(),
+                "data_venda": dt.date().isoformat(),
+                "mes_referencia": dt.strftime("%Y-%m"),
+                "semana": min((dt.day + 6) // 7, 5),
+                "synced_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+        r = (self.sb.table("vendas_pacto").select("codigo_contrato")
+             .order("codigo_contrato", desc=True).limit(1).execute())
+        maior = r.data[0]["codigo_contrato"] if r.data else None
+
+        rows: list[dict] = []
+        if maior is None:
+            # seed: um contrato de hoje via BI conversão de vendas
+            hoje = datetime.now(tz_sp).date().isoformat()
+            bi = adm._gw("POST", "/v2-conversao-venda", json={"data": hoje})
+            jd = json.loads((bi.get("content") or {}).get("jsonDados", "{}"))
+            codigos = (list((jd.get("mapaMatriculasMes") or {}).values())
+                       + list((jd.get("mapaRematriculasMes") or {}).values()))
+            if not codigos:
+                log.warning("sync_vendas_pacto: seed vazio (nenhum contrato no BI)")
+                return {"novos": 0}
+            maior = max(codigos)
+            c = _contrato(maior)
+            if c:
+                rows.append(_row(c))
+
+        # frente: contratos novos desde o último sync
+        cod, misses = maior + 1, 0
+        while misses < max_misses:
+            c = _contrato(cod)
+            if c:
+                rows.append(_row(c))
+                misses = 0
+            else:
+                misses += 1
+            cod += 1
+
+        # trás: backfill até a data pedida
+        if backfill_desde:
+            r = (self.sb.table("vendas_pacto").select("codigo_contrato")
+                 .order("codigo_contrato").limit(1).execute())
+            menor = min([r.data[0]["codigo_contrato"]] if r.data else
+                        [x["codigo_contrato"] for x in rows] or [maior])
+            cod, misses = menor - 1, 0
+            while misses < max_misses:
+                c = _contrato(cod)
+                if c:
+                    row = _row(c)
+                    if row["data_venda"] < backfill_desde:
+                        break
+                    rows.append(row)
+                    misses = 0
+                else:
+                    misses += 1
+                cod -= 1
+
+        for i in range(0, len(rows), 100):
+            self.sb.table("vendas_pacto").upsert(
+                rows[i:i + 100], on_conflict="tenant_id,codigo_contrato").execute()
+        log.info(f"sync_vendas_pacto: {len(rows)} contrato(s) gravado(s)")
+        return {"novos": len(rows)}
+
     def sincronizar_diario(self, pacto: "PactoClient", adm: "PactoADMClient") -> dict:
         """Sync completo — rodar uma vez ao dia."""
         resultado = {}
@@ -2685,6 +2804,8 @@ class CRMClient:
             ("agendamentos_status", lambda: self.sync_agendamentos_status()),
             # e pra pagina Leads (acompanhamento)
             ("leads_acomp_status", lambda: self.sync_leads_acompanhamento_status()),
+            # contratos lançados (matrícula/rematrícula/renovação) → Ranking
+            ("vendas_pacto",       lambda: self.sync_vendas_pacto(adm)),
             ("inadimplentes",      lambda: self.sync_inadimplentes(pacto, adm)),
             # base completa (~2000, ~45min): roda de madrugada junto do diario;
             # achou 22% mais parcelas que o subset de risco (medido 2026-07-02)
@@ -2830,6 +2951,7 @@ if __name__ == "__main__":
  47 - Sync: detectar fechamentos no Pacto -> pagina Agendamentos
  48 - Sync: consultora do vinculo (inadimplentes) -> leads.metadata
  49 - Sync: detectar fechamentos no Pacto -> pagina Leads (acompanhamento)
+ 50 - Sync: vendas Pacto (contratos) -> tabela vendas_pacto (Ranking)
   0 - Sair
 """
 
@@ -3089,5 +3211,9 @@ if __name__ == "__main__":
             r = _crm().sync_leads_acompanhamento_status()
             print(f"\nLeads acompanhamento: {r['fechados']} fechado(s), "
                   f"{r['vinculados']} vinculo(s) novo(s), {r['abertos']} aberto(s)")
+        elif op == "50":
+            desde = input("Backfill desde (YYYY-MM-DD, vazio = só novos): ").strip() or None
+            r = _crm().sync_vendas_pacto(adm, backfill_desde=desde)
+            print(f"\nVendas Pacto: {r['novos']} contrato(s) gravado(s)")
         else:
             print("Opcao invalida.")
