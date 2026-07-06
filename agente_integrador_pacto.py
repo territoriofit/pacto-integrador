@@ -1605,6 +1605,72 @@ class CRMClient:
                  f"de {len(abertas)} abertas")
         return {"abertas": len(abertas), "renovadas": renovadas}
 
+    def sync_agendamentos_status(self) -> dict:
+        """
+        Detecta matriculas lancadas no Pacto e marca 'fechou' na pagina de
+        Agendamentos do CRM (tabela agendamentos).
+
+        Duas etapas:
+          1. agendamentos sem lead_id ganham vinculo pelo final do telefone
+             (8 digitos) — o lead pode ter sido criado depois do agendamento.
+             Ambiguo (2+ leads com o mesmo final) fica sem vinculo.
+          2. agendamento aberto (fechou nulo/false) cujo lead virou
+             cliente/inadimplente -> fechou=true + evento na timeline.
+
+        So promove; nunca rebaixa (fechou=false continua controle manual).
+        """
+        log.info("CRM sync: agendamentos (deteccao de fechamento no Pacto)...")
+        r = self.sb.table("agendamentos").select(
+            "id,tenant_id,nome,telefone,lead_id,mes_referencia,fechou"
+        ).not_.is_("fechou", "true").execute()
+        abertos = r.data or []
+        if not abertos:
+            log.info("sync_agendamentos_status: nenhum agendamento aberto")
+            return {"abertos": 0, "vinculados": 0, "fechados": 0}
+
+        # 1. vincula lead pelo final do telefone
+        vinculados = 0
+        for ag in abertos:
+            tel = ag.get("telefone") or ""
+            if ag.get("lead_id") or len(tel) < 8:
+                continue
+            rl = self.sb.table("leads").select("id").like(
+                "phone", f"%{tel[-8:]}").limit(2).execute()
+            if rl.data and len(rl.data) == 1:
+                ag["lead_id"] = rl.data[0]["id"]
+                self.sb.table("agendamentos").update(
+                    {"lead_id": ag["lead_id"]}).eq("id", ag["id"]).execute()
+                vinculados += 1
+
+        # 2. lead ativo no Pacto = fechou
+        status_por_lead: dict[str, str] = {}
+        lead_ids = list({a["lead_id"] for a in abertos if a.get("lead_id")})
+        for i in range(0, len(lead_ids), 200):
+            rl = self.sb.table("leads").select("id,status").in_(
+                "id", lead_ids[i:i + 200]).execute()
+            for ld in rl.data or []:
+                status_por_lead[ld["id"]] = ld.get("status") or ""
+
+        fechados = 0
+        for ag in abertos:
+            if status_por_lead.get(ag.get("lead_id") or "") not in ("cliente", "inadimplente"):
+                continue
+            self.sb.table("agendamentos").update(
+                {"fechou": True}).eq("id", ag["id"]).execute()
+            self.sb.table("agendamento_eventos").insert({
+                "tenant_id":      ag["tenant_id"],
+                "agendamento_id": ag["id"],
+                "tipo":           "auto",
+                "descricao":      "Fechamento detectado no Pacto (aluno ativo)",
+                "registrado_por": "Sync Pacto",
+            }).execute()
+            fechados += 1
+            log.info(f"  fechou: {ag['nome']} ({ag['mes_referencia']})")
+
+        log.info(f"sync_agendamentos_status: {fechados} fechamentos, "
+                 f"{vinculados} vinculos novos, {len(abertos)} abertos")
+        return {"abertos": len(abertos), "vinculados": vinculados, "fechados": fechados}
+
     def sync_inadimplentes(self, pacto: "PactoClient", adm: "PactoADMClient") -> int:
         """
         Upsert de inadimplentes (contrato vencido) com alerta no metadata +
@@ -2508,6 +2574,8 @@ class CRMClient:
             # depois de alunos_ativos (metadata.vencimento fresco): marca
             # 'renovado' na pagina Renovacao quem lancou contrato novo no Pacto
             ("renovacoes_status",  lambda: self.sync_renovacoes_status()),
+            # idem pra pagina Agendamentos: quem agendou aula e virou aluno
+            ("agendamentos_status", lambda: self.sync_agendamentos_status()),
             ("inadimplentes",      lambda: self.sync_inadimplentes(pacto, adm)),
             # base completa (~2000, ~45min): roda de madrugada junto do diario;
             # achou 22% mais parcelas que o subset de risco (medido 2026-07-02)
@@ -2647,6 +2715,7 @@ if __name__ == "__main__":
  44 - Sync: visitantes antigos (base completa) -> fase Visitantes Antigos
  45 - Sync: detectar renovacoes lancadas no Pacto -> pagina Renovacao
  46 - Sync: visitantes BV (conversao de vendas) -> tabela visitantes_bv
+ 47 - Sync: detectar fechamentos no Pacto -> pagina Agendamentos
   0 - Sair
 """
 
@@ -2895,5 +2964,9 @@ if __name__ == "__main__":
             dias = input("Janela em dias [45]: ").strip()
             r = _crm().sync_visitantes_bv(adm, dias=int(dias) if dias else 45)
             print(f"\nVisitantes BV: {r}")
+        elif op == "47":
+            r = _crm().sync_agendamentos_status()
+            print(f"\nAgendamentos: {r['fechados']} fechamento(s) detectado(s), "
+                  f"{r['vinculados']} vinculo(s) novo(s), {r['abertos']} aberto(s)")
         else:
             print("Opcao invalida.")
