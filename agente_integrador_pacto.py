@@ -1671,6 +1671,64 @@ class CRMClient:
                  f"{vinculados} vinculos novos, {len(abertos)} abertos")
         return {"abertos": len(abertos), "vinculados": vinculados, "fechados": fechados}
 
+    def sync_consultora_vinculo(self, adm: "PactoADMClient") -> int:
+        """
+        Grava leads.metadata.consultora com a consultora do VINCULO do cliente
+        no Pacto (GET /v1/cliente/{codigo} -> vinculos[tipoVinculo=CONSULTOR]).
+
+        Escopo: inadimplentes (status=inadimplente + quem tem linha em
+        parcelas_atrasadas) — alimenta o resumo por consultora do kanban de
+        Inadimplencia. 1 request por cliente (~100-150/dia).
+
+        ATENCAO: o upsert do sync_alunos_ativos SUBSTITUI o metadata inteiro,
+        entao este sync precisa rodar DEPOIS dele no diario (padrao
+        ultimo_acesso/aniversariantes).
+        """
+        log.info("CRM sync: consultora do vinculo (inadimplentes)...")
+        alvo: dict[str, dict] = {}
+        r = self.sb.table("leads").select("id,metadata").eq("status", "inadimplente").execute()
+        for ld in r.data or []:
+            alvo[ld["id"]] = ld
+        rp = self.sb.table("parcelas_atrasadas").select("lead_id").not_.is_(
+            "lead_id", "null").execute()
+        extras = list({x["lead_id"] for x in (rp.data or [])} - set(alvo))
+        for i in range(0, len(extras), 100):
+            rl = self.sb.table("leads").select("id,metadata").in_("id", extras[i:i + 100]).execute()
+            for ld in rl.data or []:
+                alvo[ld["id"]] = ld
+
+        # nomes canonicos iguais aos usados em renovacoes/agendamentos
+        CANON = {"kelytta": "Kellyta", "kellyta": "Kellyta",
+                 "nathalia": "Nathalia", "nathy": "Nathalia",
+                 "raiane": "Raiane", "rai": "Raiane"}
+        n = falhas = 0
+        for ld in alvo.values():
+            meta = ld.get("metadata") or {}
+            cod = meta.get("pacto_codigo")
+            if not cod:
+                continue
+            try:
+                r = adm._gw("GET", f"/v1/cliente/{cod}", timeout=30)
+                vincs = (r.get("content") or {}).get("vinculos") or []
+            except Exception as e:
+                log.warning(f"vinculo cliente {cod}: {e}")
+                falhas += 1
+                continue
+            nome = next((((v.get("colaborador") or {}).get("nome") or "")
+                         for v in vincs if v.get("tipoVinculo") == "CONSULTOR"), "")
+            if not nome.strip():
+                continue
+            primeiro = nome.strip().split()[0]
+            consultora = CANON.get(primeiro.lower(), primeiro.title())
+            if meta.get("consultora") == consultora:
+                continue
+            meta["consultora"] = consultora
+            self.sb.table("leads").update({"metadata": meta}).eq("id", ld["id"]).execute()
+            n += 1
+        log.info(f"sync_consultora_vinculo: {n} atualizados de {len(alvo)} "
+                 f"({falhas} falhas)")
+        return n
+
     def sync_inadimplentes(self, pacto: "PactoClient", adm: "PactoADMClient") -> int:
         """
         Upsert de inadimplentes (contrato vencido) com alerta no metadata +
@@ -2580,6 +2638,9 @@ class CRMClient:
             # base completa (~2000, ~45min): roda de madrugada junto do diario;
             # achou 22% mais parcelas que o subset de risco (medido 2026-07-02)
             ("parcelas_atrasadas", lambda: self.sync_parcelas_atrasadas(pacto, adm, todos_ativos=True)),
+            # depois de alunos_ativos (metadata zerado) e parcelas (lista alvo
+            # fresca): consultora do vinculo pro resumo de Inadimplencia
+            ("consultora_vinculo", lambda: self.sync_consultora_vinculo(adm)),
             # 1 request/aluno (~15min na base completa) — alimenta o card do
             # Kanban de Alunos ("Xd sem vir")
             ("ultimo_acesso",      lambda: self.sync_ultimo_acesso(pacto)),
@@ -2716,6 +2777,7 @@ if __name__ == "__main__":
  45 - Sync: detectar renovacoes lancadas no Pacto -> pagina Renovacao
  46 - Sync: visitantes BV (conversao de vendas) -> tabela visitantes_bv
  47 - Sync: detectar fechamentos no Pacto -> pagina Agendamentos
+ 48 - Sync: consultora do vinculo (inadimplentes) -> leads.metadata
   0 - Sair
 """
 
@@ -2968,5 +3030,8 @@ if __name__ == "__main__":
             r = _crm().sync_agendamentos_status()
             print(f"\nAgendamentos: {r['fechados']} fechamento(s) detectado(s), "
                   f"{r['vinculados']} vinculo(s) novo(s), {r['abertos']} aberto(s)")
+        elif op == "48":
+            n = _crm().sync_consultora_vinculo(adm)
+            print(f"\nConsultora do vinculo: {n} lead(s) atualizados")
         else:
             print("Opcao invalida.")
