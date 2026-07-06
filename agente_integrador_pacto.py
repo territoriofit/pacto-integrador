@@ -1671,6 +1671,54 @@ class CRMClient:
                  f"{vinculados} vinculos novos, {len(abertos)} abertos")
         return {"abertos": len(abertos), "vinculados": vinculados, "fechados": fechados}
 
+    def sync_leads_acompanhamento_status(self) -> dict:
+        """
+        Pagina Leads (acompanhamento): vincula linhas sem lead_id pelo final do
+        telefone e marca fechou=true quando o lead virou cliente/inadimplente
+        no Pacto. Mesma logica do sync_agendamentos_status; so promove.
+        """
+        log.info("CRM sync: leads acompanhamento (fechamento no Pacto)...")
+        r = self.sb.table("leads_acompanhamento").select(
+            "id,nome,telefone,lead_id,mes_referencia,fechou"
+        ).not_.is_("fechou", "true").execute()
+        abertos = r.data or []
+        if not abertos:
+            return {"abertos": 0, "vinculados": 0, "fechados": 0}
+
+        vinculados = 0
+        for ln in abertos:
+            tel = ln.get("telefone") or ""
+            if ln.get("lead_id") or len(tel) < 8:
+                continue
+            rl = self.sb.table("leads").select("id").like(
+                "phone", f"%{tel[-8:]}").limit(2).execute()
+            if rl.data and len(rl.data) == 1:
+                ln["lead_id"] = rl.data[0]["id"]
+                self.sb.table("leads_acompanhamento").update(
+                    {"lead_id": ln["lead_id"]}).eq("id", ln["id"]).execute()
+                vinculados += 1
+
+        status_por_lead: dict[str, str] = {}
+        lead_ids = list({x["lead_id"] for x in abertos if x.get("lead_id")})
+        for i in range(0, len(lead_ids), 200):
+            rl = self.sb.table("leads").select("id,status").in_(
+                "id", lead_ids[i:i + 200]).execute()
+            for ld in rl.data or []:
+                status_por_lead[ld["id"]] = ld.get("status") or ""
+
+        fechados = 0
+        for ln in abertos:
+            if status_por_lead.get(ln.get("lead_id") or "") not in ("cliente", "inadimplente"):
+                continue
+            self.sb.table("leads_acompanhamento").update(
+                {"fechou": True}).eq("id", ln["id"]).execute()
+            fechados += 1
+            log.info(f"  fechou: {ln.get('nome') or ln.get('telefone')} ({ln['mes_referencia']})")
+
+        log.info(f"sync_leads_acompanhamento_status: {fechados} fechados, "
+                 f"{vinculados} vinculos novos, {len(abertos)} abertos")
+        return {"abertos": len(abertos), "vinculados": vinculados, "fechados": fechados}
+
     def sync_consultora_vinculo(self, adm: "PactoADMClient") -> int:
         """
         Grava leads.metadata.consultora com a consultora do VINCULO do cliente
@@ -2634,6 +2682,8 @@ class CRMClient:
             ("renovacoes_status",  lambda: self.sync_renovacoes_status()),
             # idem pra pagina Agendamentos: quem agendou aula e virou aluno
             ("agendamentos_status", lambda: self.sync_agendamentos_status()),
+            # e pra pagina Leads (acompanhamento)
+            ("leads_acomp_status", lambda: self.sync_leads_acompanhamento_status()),
             ("inadimplentes",      lambda: self.sync_inadimplentes(pacto, adm)),
             # base completa (~2000, ~45min): roda de madrugada junto do diario;
             # achou 22% mais parcelas que o subset de risco (medido 2026-07-02)
@@ -2778,6 +2828,7 @@ if __name__ == "__main__":
  46 - Sync: visitantes BV (conversao de vendas) -> tabela visitantes_bv
  47 - Sync: detectar fechamentos no Pacto -> pagina Agendamentos
  48 - Sync: consultora do vinculo (inadimplentes) -> leads.metadata
+ 49 - Sync: detectar fechamentos no Pacto -> pagina Leads (acompanhamento)
   0 - Sair
 """
 
@@ -3033,5 +3084,9 @@ if __name__ == "__main__":
         elif op == "48":
             n = _crm().sync_consultora_vinculo(adm)
             print(f"\nConsultora do vinculo: {n} lead(s) atualizados")
+        elif op == "49":
+            r = _crm().sync_leads_acompanhamento_status()
+            print(f"\nLeads acompanhamento: {r['fechados']} fechado(s), "
+                  f"{r['vinculados']} vinculo(s) novo(s), {r['abertos']} aberto(s)")
         else:
             print("Opcao invalida.")
