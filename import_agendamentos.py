@@ -31,12 +31,15 @@ CONSULTOR_CANONICO = {
     "kelytta": "Kellyta", "kellyta": "Kellyta", "ly": "Kellyta",
 }
 
+# nomes canonicos das modalidades (mesma lista do frontend: MODALIDADES)
 AULA_CANONICA = {
-    "musc": "Musc", "exp musc": "Musc", "musculacao": "Musc",
+    "musc": "Musculação", "exp musc": "Musculação", "musculacao": "Musculação",
     "visita": "Visita", "viista": "Visita", "visitar": "Visita",
     "fechar": "Fechar", "visita/fechar": "Visita/Fechar",
     "bike": "Bike", "pilates": "Pilates", "funcional": "Funcional",
-    "fit dance": "Fit Dance", "fitdance": "Fit Dance", "ritmos": "Ritmos",
+    "fit dance": "FitDance", "fitdance": "FitDance", "ritmos": "Ritmos",
+    "jump": "Jump", "jump/ bike": "Jump", "jump/bike": "Jump",
+    "funcional /musc": "Funcional", "funcional/musc": "Funcional",
 }
 
 
