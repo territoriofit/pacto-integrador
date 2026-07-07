@@ -9,7 +9,7 @@ import time
 import uuid
 import logging
 import requests
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone as dt_timezone
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -2777,6 +2777,184 @@ class CRMClient:
         log.info(f"sync_vendas_pacto: {len(rows)} contrato(s) gravado(s)")
         return {"novos": len(rows)}
 
+    def sync_vendas_detalhe_mes(self, adm: "PactoADMClient",
+                                mes: str | None = None) -> dict:
+        """
+        Enriquece as vendas do mês (vendas_pacto) para a página Vendas do Mês:
+          - codigo_cliente: match do nome_cliente com leads (mesma fonte Pacto)
+          - consultora_vinculo: vínculo CONSULTOR do cliente no Pacto (GET
+            /v1/cliente/{cod}); se o vínculo mudar no Pacto, atualiza aqui e
+            também em leads.metadata.consultora
+          - recorrente: regimeRecorrencia do contrato
+          - caixa_aberto / parcelas_abertas: soma das parcelas NÃO pagas do
+            próprio contrato (GET /parcelas/{codigoPessoa})
+        Roda no diário APÓS sync_vendas_pacto. ~3 requests por venda do mês.
+        """
+        mes = mes or datetime.now().strftime("%Y-%m")
+        log.info(f"CRM sync: detalhe das vendas do mês {mes}...")
+        r = (self.sb.table("vendas_pacto").select(
+                "id,codigo_contrato,codigo_pessoa,nome_cliente,codigo_cliente")
+             .eq("mes_referencia", mes).execute())
+        vendas = r.data or []
+        if not vendas:
+            return {"vendas": 0}
+
+        # nome (canônico Pacto) -> codigo_cliente via leads
+        nomes = list({v["nome_cliente"] for v in vendas
+                      if v.get("nome_cliente") and not v.get("codigo_cliente")})
+        nome_para_cod: dict[str, int] = {}
+        for i in range(0, len(nomes), 50):
+            rl = (self.sb.table("leads").select("name,metadata")
+                  .in_("name", nomes[i:i + 50]).execute())
+            for ld in rl.data or []:
+                cod = (ld.get("metadata") or {}).get("pacto_codigo")
+                if cod:
+                    nome_para_cod.setdefault(ld["name"], int(cod))
+
+        n = falhas = 0
+        for v in vendas:
+            upd: dict = {}
+            cod_cliente = v.get("codigo_cliente") or nome_para_cod.get(v.get("nome_cliente") or "")
+            if cod_cliente and not v.get("codigo_cliente"):
+                upd["codigo_cliente"] = cod_cliente
+
+            # vínculo consultora (fonte oficial de atribuição da venda)
+            if cod_cliente:
+                try:
+                    rc = adm._gw("GET", f"/v1/cliente/{cod_cliente}", timeout=30)
+                    vincs = (rc.get("content") or {}).get("vinculos") or []
+                    nome = next((((x.get("colaborador") or {}).get("nome") or "")
+                                 for x in vincs if x.get("tipoVinculo") == "CONSULTOR"), "")
+                    if nome.strip():
+                        primeiro = nome.strip().split()[0].lower()
+                        consultora = self._CONSULTORA_CANON.get(primeiro, primeiro.title())
+                        upd["consultora_vinculo"] = consultora
+                        # mantém o lead alinhado com o Pacto (pedido do usuário)
+                        rl = (self.sb.table("leads").select("id,metadata")
+                              .eq("metadata->>pacto_codigo", str(cod_cliente))
+                              .limit(1).execute())
+                        if rl.data:
+                            meta = rl.data[0].get("metadata") or {}
+                            if meta.get("consultora") != consultora:
+                                meta["consultora"] = consultora
+                                (self.sb.table("leads").update({"metadata": meta})
+                                 .eq("id", rl.data[0]["id"]).execute())
+                except Exception as e:
+                    log.warning(f"vinculo venda {v['codigo_contrato']}: {e}")
+                    falhas += 1
+
+            # recorrente + caixa em aberto do contrato
+            try:
+                rc = adm._gw("GET", f"/contratos/{v['codigo_contrato']}")
+                c = rc.get("content") or {}
+                if isinstance(c, dict) and c.get("codigo"):
+                    upd["recorrente"] = bool(c.get("regimeRecorrencia"))
+            except Exception as e:
+                log.warning(f"contrato {v['codigo_contrato']}: {e}")
+                falhas += 1
+            try:
+                rp = adm._gw("GET", f"/parcelas/{v['codigo_pessoa']}",
+                             params={"size": 200})
+                parcelas = rp.get("content", []) if isinstance(rp, dict) else []
+                abertas = [p for p in parcelas
+                           if p.get("contrato") == v["codigo_contrato"]
+                           and p.get("situacao") != "PG"]
+                upd["caixa_aberto"] = round(sum(float(p.get("valor") or 0)
+                                                for p in abertas), 2)
+                upd["parcelas_abertas"] = len(abertas)
+            except Exception as e:
+                log.warning(f"parcelas venda {v['codigo_contrato']}: {e}")
+                falhas += 1
+
+            if upd:
+                upd["detalhe_synced_at"] = datetime.now(dt_timezone.utc).isoformat()
+                self.sb.table("vendas_pacto").update(upd).eq("id", v["id"]).execute()
+                n += 1
+        log.info(f"sync_vendas_detalhe_mes: {n}/{len(vendas)} vendas ({falhas} falhas)")
+        return {"vendas": len(vendas), "atualizadas": n, "falhas": falhas}
+
+    def marcar_recorrentes_parcelas(self, adm: "PactoADMClient") -> int:
+        """
+        Marca parcelas_atrasadas.recorrente pelo regimeRecorrencia do contrato
+        (1 request por CONTRATO distinto sem flag — barato). Alimenta o corte
+        'inadimplência de plano recorrente' da página Vendas do Mês.
+        """
+        r = (self.sb.table("parcelas_atrasadas").select("contrato")
+             .is_("recorrente", "null").execute())
+        contratos = sorted({x["contrato"] for x in (r.data or []) if x.get("contrato")})
+        n = 0
+        for cod in contratos:
+            try:
+                rc = adm._gw("GET", f"/contratos/{cod}")
+                c = rc.get("content") or {}
+                if isinstance(c, dict) and c.get("codigo"):
+                    rec = bool(c.get("regimeRecorrencia"))
+                    (self.sb.table("parcelas_atrasadas")
+                     .update({"recorrente": rec}).eq("contrato", cod).execute())
+                    n += 1
+            except Exception as e:
+                log.warning(f"recorrente contrato {cod}: {e}")
+        log.info(f"marcar_recorrentes_parcelas: {n}/{len(contratos)} contratos")
+        return n
+
+    def sync_avaliacoes_fisicas(self, pacto: "PactoClient",
+                                mes: str | None = None) -> int:
+        """
+        Tabela avaliacoes_fisicas_prof: resumo mensal de avaliações físicas
+        POR AVALIADOR (login que lançou — pedido do usuário). A listagem
+        /psec/avaliacao-fisica-bi/avaliacoes está quebrada no Pacto (500 em
+        qualquer formato de filters); a fonte é o resumo
+        GET /psec/avaliacao-fisica-bi com codigoAvaliador — validado
+        2026-07-07: soma por avaliador == total geral do período.
+        1 request por colaborador ativo (~15).
+        """
+        from datetime import timezone as _tz
+        tz_sp = _tz(timedelta(hours=-3))
+        agora = datetime.now(tz_sp)
+        if mes:
+            ano, m = int(mes[:4]), int(mes[5:7])
+        else:
+            ano, m = agora.year, agora.month
+            mes = f"{ano:04d}-{m:02d}"
+        ini = datetime(ano, m, 1, tzinfo=tz_sp)
+        prox = datetime(ano + (1 if m == 12 else 0), 1 if m == 12 else m + 1, 1,
+                        tzinfo=tz_sp)
+        fim = min(prox - timedelta(seconds=1), agora)
+
+        r = pacto._req("GET", "/psec/colaboradores/all-simple")
+        colabs = [c for c in (r.get("content") or [])
+                  if c.get("situacao") == "ATIVO"]
+        rows: list[dict] = []
+        for c in colabs:
+            cid = c.get("codigoColaborador") or c.get("id")
+            try:
+                rb = pacto._req("GET", "/psec/avaliacao-fisica-bi", params={
+                    "dataInicio": int(ini.timestamp() * 1000),
+                    "dataFim": int(fim.timestamp() * 1000),
+                    "codigoAvaliador": cid})
+            except Exception as e:
+                log.warning(f"avaliacao-fisica-bi avaliador {cid}: {e}")
+                continue
+            ct = rb.get("content") or {}
+            nome = " ".join(w.capitalize() for w in (c.get("nome") or "").split())
+            rows.append({
+                "tenant_id": self.tenant_id,
+                "mes_referencia": mes,
+                "professor": nome,
+                "codigo_colaborador": cid,
+                "avaliacoes": ct.get("avaliacoes") or 0,
+                "novas": ct.get("novas") or 0,
+                "reavaliacoes": ct.get("reavaliacoes") or 0,
+                "synced_at": datetime.now(dt_timezone.utc).isoformat(),
+            })
+        if rows:
+            self.sb.table("avaliacoes_fisicas_prof").upsert(
+                rows, on_conflict="tenant_id,mes_referencia,professor").execute()
+        total = sum(x["avaliacoes"] for x in rows)
+        log.info(f"sync_avaliacoes_fisicas: {mes} — {total} avaliações "
+                 f"em {len(rows)} colaboradores")
+        return total
+
     def sincronizar_diario(self, pacto: "PactoClient", adm: "PactoADMClient") -> dict:
         """Sync completo — rodar uma vez ao dia."""
         resultado = {}
@@ -2806,6 +2984,10 @@ class CRMClient:
             ("leads_acomp_status", lambda: self.sync_leads_acompanhamento_status()),
             # contratos lançados (matrícula/rematrícula/renovação) → Ranking
             ("vendas_pacto",       lambda: self.sync_vendas_pacto(adm)),
+            # página Vendas do Mês: vínculo consultora + caixa aberto + recorrente
+            ("vendas_detalhe_mes", lambda: self.sync_vendas_detalhe_mes(adm)),
+            # página Ranking Profs: avaliações físicas por professor
+            ("avaliacoes_fisicas", lambda: self.sync_avaliacoes_fisicas(pacto)),
             ("inadimplentes",      lambda: self.sync_inadimplentes(pacto, adm)),
             # base completa (~2000, ~45min): roda de madrugada junto do diario;
             # achou 22% mais parcelas que o subset de risco (medido 2026-07-02)
@@ -2813,6 +2995,8 @@ class CRMClient:
             # depois de alunos_ativos (metadata zerado) e parcelas (lista alvo
             # fresca): consultora do vinculo pro resumo de Inadimplencia
             ("consultora_vinculo", lambda: self.sync_consultora_vinculo(adm)),
+            # depois de parcelas_atrasadas: flag recorrente por contrato
+            ("recorrentes_parcelas", lambda: self.marcar_recorrentes_parcelas(adm)),
             # 1 request/aluno (~15min na base completa) — alimenta o card do
             # Kanban de Alunos ("Xd sem vir")
             ("ultimo_acesso",      lambda: self.sync_ultimo_acesso(pacto)),
@@ -2952,6 +3136,9 @@ if __name__ == "__main__":
  48 - Sync: consultora do vinculo (inadimplentes) -> leads.metadata
  49 - Sync: detectar fechamentos no Pacto -> pagina Leads (acompanhamento)
  50 - Sync: vendas Pacto (contratos) -> tabela vendas_pacto (Ranking)
+ 51 - Sync: detalhe vendas do mes (vinculo/caixa aberto/recorrente)
+ 52 - Sync: flag recorrente nas parcelas atrasadas
+ 53 - Sync: avaliacoes fisicas (BI) -> tabela avaliacoes_fisicas
   0 - Sair
 """
 
@@ -3215,5 +3402,15 @@ if __name__ == "__main__":
             desde = input("Backfill desde (YYYY-MM-DD, vazio = só novos): ").strip() or None
             r = _crm().sync_vendas_pacto(adm, backfill_desde=desde)
             print(f"\nVendas Pacto: {r['novos']} contrato(s) gravado(s)")
+        elif op == "51":
+            mes = input("Mês (YYYY-MM, vazio = atual): ").strip() or None
+            r = _crm().sync_vendas_detalhe_mes(adm, mes=mes)
+            print(f"\nDetalhe vendas: {r}")
+        elif op == "52":
+            n = _crm().marcar_recorrentes_parcelas(adm)
+            print(f"\nRecorrentes: {n} contrato(s) marcados")
+        elif op == "53":
+            n = _crm().sync_avaliacoes_fisicas(pacto)
+            print(f"\nAvaliações físicas: {n} registro(s)")
         else:
             print("Opcao invalida.")
