@@ -2955,6 +2955,87 @@ class CRMClient:
                  f"em {len(rows)} colaboradores")
         return total
 
+    def sync_vendas_avulsas(self, pacto: "PactoClient", adm: "PactoADMClient",
+                            mes: str | None = None,
+                            base: str = "ativos",
+                            pessoa_max: int | None = None) -> dict:
+        """
+        Tabela vendas_avulsas: produtos de estoque e diárias — parcelas com
+        descricao "VENDA AVULSA" e sem contrato, lançadas no mês. Completa o
+        Faturamento por período do Pacto (que soma contratos + produto + diária).
+
+        base="ativos": varre as pessoas da base ativa (~2000; roda no diário —
+          pega compras de alunos, mas NÃO diárias de visitantes).
+        base="completa": varre codigoPessoa 1..pessoa_max (padrão: maior pessoa
+          conhecida + 500). ~20k requests, 1-2h — usar para fechar o mês.
+        """
+        from datetime import timezone as _tz
+        tz_sp = _tz(timedelta(hours=-3))
+        agora = datetime.now(tz_sp)
+        if mes:
+            ano, m = int(mes[:4]), int(mes[5:7])
+        else:
+            ano, m = agora.year, agora.month
+            mes = f"{ano:04d}-{m:02d}"
+        ini = int(datetime(ano, m, 1, tzinfo=tz_sp).timestamp() * 1000)
+        prox = datetime(ano + (1 if m == 12 else 0), 1 if m == 12 else m + 1, 1,
+                        tzinfo=tz_sp)
+        fim = int(prox.timestamp() * 1000)
+
+        if base == "completa":
+            if not pessoa_max:
+                r = (self.sb.table("vendas_pacto").select("codigo_pessoa")
+                     .order("codigo_pessoa", desc=True).limit(1).execute())
+                pessoa_max = (r.data[0]["codigo_pessoa"] if r.data else 20500) + 500
+            pessoas = list(range(1, pessoa_max + 1))
+        else:
+            ativos = pacto.alunos_ativos()
+            pessoas = sorted({a.get("codigoPessoa") for a in ativos
+                              if a.get("codigoPessoa")})
+        log.info(f"sync_vendas_avulsas: {mes}, base={base}, "
+                 f"{len(pessoas)} pessoas...")
+
+        rows: list[dict] = []
+        erros = 0
+        for i, cp in enumerate(pessoas):
+            try:
+                r = adm._gw("GET", f"/parcelas/{cp}", params={"size": 100})
+                parcelas = r.get("content", []) if isinstance(r, dict) else []
+            except Exception:
+                erros += 1
+                continue
+            for p in parcelas:
+                dl = p.get("dataLancamento") or 0
+                desc = (p.get("descricao") or "").strip().upper()
+                if (ini <= dl < fim and not p.get("contrato")
+                        and desc.startswith("VENDA AVULSA")
+                        and p.get("situacao") != "RG"):
+                    dp = p.get("dataPagamento")
+                    rows.append({
+                        "tenant_id": self.tenant_id,
+                        "parcela_codigo": p.get("codigo"),
+                        "codigo_pessoa": cp,
+                        "descricao": p.get("descricao"),
+                        "valor": p.get("valor"),
+                        "situacao": p.get("situacao"),
+                        "data_lancamento": datetime.fromtimestamp(
+                            dl / 1000, tz=tz_sp).date().isoformat(),
+                        "data_pagamento": (datetime.fromtimestamp(
+                            dp / 1000, tz=tz_sp).date().isoformat() if dp else None),
+                        "mes_referencia": mes,
+                        "synced_at": datetime.now(dt_timezone.utc).isoformat(),
+                    })
+            if (i + 1) % 500 == 0:
+                log.info(f"vendas avulsas: {i + 1}/{len(pessoas)} pessoas, "
+                         f"{len(rows)} vendas, {erros} erros")
+        for i in range(0, len(rows), 100):
+            self.sb.table("vendas_avulsas").upsert(
+                rows[i:i + 100], on_conflict="tenant_id,parcela_codigo").execute()
+        total = sum(float(x["valor"] or 0) for x in rows)
+        log.info(f"sync_vendas_avulsas: {len(rows)} vendas avulsas em {mes}, "
+                 f"R$ {total:.2f} ({erros} erros)")
+        return {"vendas": len(rows), "total": round(total, 2), "erros": erros}
+
     def sincronizar_diario(self, pacto: "PactoClient", adm: "PactoADMClient") -> dict:
         """Sync completo — rodar uma vez ao dia."""
         resultado = {}
@@ -2988,6 +3069,9 @@ class CRMClient:
             ("vendas_detalhe_mes", lambda: self.sync_vendas_detalhe_mes(adm)),
             # página Ranking Profs: avaliações físicas por professor
             ("avaliacoes_fisicas", lambda: self.sync_avaliacoes_fisicas(pacto)),
+            # produtos/diárias comprados pela base ativa (visitantes: varredura
+            # completa mensal via menu 54 base=completa)
+            ("vendas_avulsas",     lambda: self.sync_vendas_avulsas(pacto, adm)),
             ("inadimplentes",      lambda: self.sync_inadimplentes(pacto, adm)),
             # base completa (~2000, ~45min): roda de madrugada junto do diario;
             # achou 22% mais parcelas que o subset de risco (medido 2026-07-02)
@@ -3139,6 +3223,7 @@ if __name__ == "__main__":
  51 - Sync: detalhe vendas do mes (vinculo/caixa aberto/recorrente)
  52 - Sync: flag recorrente nas parcelas atrasadas
  53 - Sync: avaliacoes fisicas (BI) -> tabela avaliacoes_fisicas
+ 54 - Sync: vendas avulsas (produto/diaria) -> tabela vendas_avulsas
   0 - Sair
 """
 
@@ -3412,5 +3497,10 @@ if __name__ == "__main__":
         elif op == "53":
             n = _crm().sync_avaliacoes_fisicas(pacto)
             print(f"\nAvaliações físicas: {n} registro(s)")
+        elif op == "54":
+            mes = input("Mês (YYYY-MM, vazio = atual): ").strip() or None
+            base = input("Base (ativos/completa, vazio = ativos): ").strip() or "ativos"
+            r = _crm().sync_vendas_avulsas(pacto, adm, mes=mes, base=base)
+            print(f"\nVendas avulsas: {r}")
         else:
             print("Opcao invalida.")
