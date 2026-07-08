@@ -2433,10 +2433,118 @@ class CRMClient:
                     }).eq("id", lids2[row["id"]]["id"]).execute()
                     extra += 1
 
+        # 5. BVs invisiveis a fase HO (incidente 2026-07-08: 49 no relatorio
+        #    oficial x 39 na tabela) — meta fechada no MESMO DIA (visitou e
+        #    matriculou antes do scan da hora seguinte) ou cadastro sem meta
+        #    (ex.: check-in Gympass). Cadastro novo = codigo sequencial novo:
+        #    GET /v1/cliente/{codigo} enxerga o cadastro independente da meta.
+        #    data_visita = dia em que o lead nasceu no CRM (sync horario de
+        #    visitantes cria no mesmo dia) ou hoje.
+        recuperados = []
+        r = (self.sb.table("visitantes_bv").select("codigo_cliente")
+             .order("codigo_cliente", desc=True).limit(1).execute())
+        max_cod = int((r.data or [{}])[0].get("codigo_cliente") or 0)
+        if max_cod:
+            r = self.sb.table("visitantes_bv").select("codigo_cliente").gte(
+                "codigo_cliente", max_cod - 80).execute()
+            ja_tem = {int(x["codigo_cliente"]) for x in (r.data or [])}
+            cod, misses = max_cod - 80, 0
+            while misses < 8 and cod < max_cod + 400:
+                cod += 1
+                if cod in ja_tem:
+                    misses = 0
+                    continue
+                try:
+                    c = (adm._gw("GET", f"/v1/cliente/{cod}", timeout=30) or {}).get("content") or {}
+                except Exception as e:
+                    log.warning(f"bv walker cliente {cod}: {e}")
+                    c = {}
+                if not c.get("codigo"):
+                    if cod > max_cod:
+                        misses += 1
+                    continue
+                misses = 0
+                sit = ((c.get("situacao") or {}).get("codigo") or "").upper()
+                rl = self.sb.table("leads").select("id,status,created_at").eq(
+                    "id", _pacto_lead_id(cod, self.tenant_id)).execute()
+                lead = (rl.data or [None])[0]
+                dv = ((lead or {}).get("created_at") or date.today().isoformat())[:10]
+                # created_at do lead so e proxy confiavel da visita quando o
+                # lead nasceu DENTRO da janela (sync horario cria no mesmo
+                # dia). Lead antigo = data viria de backfill/import (incidente
+                # 2026-07-08: visitantes de junho datados como julho) — pula.
+                if lead and date.fromisoformat(dv) < ini:
+                    continue
+                convertido = (sit == "AT"
+                              or (lead or {}).get("status") in ("cliente", "inadimplente"))
+                consultor = next((((v.get("colaborador") or {}).get("nome") or "")
+                                  for v in (c.get("vinculos") or [])
+                                  if v.get("tipoVinculo") == "CONSULTOR"), "")
+                recuperados.append({
+                    "tenant_id":      self.tenant_id,
+                    "lead_id":        (lead or {}).get("id"),
+                    "codigo_cliente": cod,
+                    "nome":           ((c.get("pessoa") or {}).get("nome")),
+                    "matricula":      c.get("matricula"),
+                    "situacao":       "Ativo" if convertido else "Visitante",
+                    "tipo_bv":        "Rematricula" if (lead or {}).get("status") == "inativo" else "Matricula",
+                    "consultor":      (consultor.title() or None),
+                    "data_visita":    dv,
+                    "mes_referencia": dv[:7],
+                    "convertido_em":  agora if convertido else None,
+                })
+
+        # 6. rematriculas com codigo ANTIGO que fecharam rapido (meta sumiu da
+        #    HO antes do scan): cruza as vendas MA/RE do mes (vendas_pacto) —
+        #    venda sem linha BV no mes vira BV 'Ativo' com data da venda.
+        mes_atual = date.today().strftime("%Y-%m")
+        rv = (self.sb.table("vendas_pacto").select(
+                "codigo_cliente,nome_cliente,tipo,data_venda,consultora_vinculo,responsavel_raw")
+              .gte("data_venda", f"{mes_atual}-01").in_("tipo", ["MA", "RE"])
+              .not_.is_("codigo_cliente", "null").execute())
+        rb = self.sb.table("visitantes_bv").select("codigo_cliente").eq(
+            "mes_referencia", mes_atual).execute()
+        bv_mes = {int(x["codigo_cliente"]) for x in (rb.data or [])}
+        bv_mes.update(int(x["codigo_cliente"]) for x in recuperados
+                      if x["mes_referencia"] == mes_atual)
+        for v in (rv.data or []):
+            cod = int(v["codigo_cliente"])
+            if cod in bv_mes:
+                continue
+            bv_mes.add(cod)
+            rl = self.sb.table("leads").select("id").eq(
+                "id", _pacto_lead_id(cod, self.tenant_id)).execute()
+            try:
+                c = (adm._gw("GET", f"/v1/cliente/{cod}", timeout=30) or {}).get("content") or {}
+            except Exception:
+                c = {}
+            recuperados.append({
+                "tenant_id":      self.tenant_id,
+                "lead_id":        ((rl.data or [None])[0] or {}).get("id"),
+                "codigo_cliente": cod,
+                "nome":           v.get("nome_cliente"),
+                "matricula":      c.get("matricula"),
+                "situacao":       "Ativo",
+                "tipo_bv":        "Rematricula" if v.get("tipo") == "RE" else "Matricula",
+                "consultor":      ((v.get("consultora_vinculo") or v.get("responsavel_raw") or "").title() or None),
+                "data_visita":    (v.get("data_venda") or date.today().isoformat())[:10],
+                "mes_referencia": mes_atual,
+                "convertido_em":  agora,
+            })
+
+        for i in range(0, len(recuperados), 200):
+            self.sb.table("visitantes_bv").upsert(
+                recuperados[i:i+200],
+                on_conflict="tenant_id,codigo_cliente,mes_referencia",
+                ignore_duplicates=True,
+            ).execute()
+
         log.info(f"sync_visitantes_bv: {len(vistos)} na janela, "
-                 f"{len(novos)} novos, {len(convertidos) + extra} conversoes")
+                 f"{len(novos)} novos, {len(convertidos) + extra} conversoes, "
+                 f"{len(recuperados)} recuperados fora da HO")
         return {"visitantes": len(vistos), "novos": len(novos),
-                "convertidos": len(convertidos) + extra}
+                "convertidos": len(convertidos) + extra,
+                "recuperados_fora_ho": len(recuperados)}
 
     def sincronizar_leads(self, pacto: "PactoClient", adm: "PactoADMClient") -> dict:
         """Sync rápido de leads — rodar a cada hora."""
