@@ -3036,10 +3036,50 @@ class CRMClient:
                  f"R$ {total:.2f} ({erros} erros)")
         return {"vendas": len(rows), "total": round(total, 2), "erros": erros}
 
+    def refresh_instagram_token(self) -> dict:
+        """Renova o token da rota 'API com login do Instagram' (config
+        INSTAGRAM_LOGIN_TOKEN). Tokens long-lived valem 60 dias; a Meta exige
+        idade mínima de 24h pra renovar, então renovamos 1x por semana
+        (INSTAGRAM_LOGIN_TOKEN_REFRESHED_AT guarda a última renovação)."""
+        r = self.sb.table("config").select("key,value").in_(
+            "key", ["INSTAGRAM_LOGIN_TOKEN", "INSTAGRAM_LOGIN_TOKEN_REFRESHED_AT"]).execute()
+        cfg = {row["key"]: row["value"] for row in (r.data or [])}
+        token = cfg.get("INSTAGRAM_LOGIN_TOKEN")
+        if not token:
+            return {"status": "sem token configurado"}
+        last = cfg.get("INSTAGRAM_LOGIN_TOKEN_REFRESHED_AT")
+        if last:
+            try:
+                idade = datetime.now(dt_timezone.utc) - datetime.fromisoformat(last)
+                if idade.days < 7:
+                    return {"status": f"renovado há {idade.days}d, pulando"}
+            except ValueError:
+                pass
+        resp = requests.get(
+            "https://graph.instagram.com/refresh_access_token",
+            params={"grant_type": "ig_refresh_token", "access_token": token},
+            timeout=30)
+        data = resp.json()
+        if resp.status_code != 200 or "access_token" not in data:
+            log.error(f"refresh_instagram_token: {data}")
+            return {"status": f"erro: {data.get('error', data)}"}
+        agora = datetime.now(dt_timezone.utc).isoformat()
+        self.sb.table("config").upsert(
+            {"key": "INSTAGRAM_LOGIN_TOKEN", "value": data["access_token"]},
+            on_conflict="key").execute()
+        self.sb.table("config").upsert(
+            {"key": "INSTAGRAM_LOGIN_TOKEN_REFRESHED_AT", "value": agora},
+            on_conflict="key").execute()
+        dias = data.get("expires_in", 0) // 86400
+        log.info(f"refresh_instagram_token: renovado, expira em {dias} dias")
+        return {"status": "renovado", "expira_em_dias": dias}
+
     def sincronizar_diario(self, pacto: "PactoClient", adm: "PactoADMClient") -> dict:
         """Sync completo — rodar uma vez ao dia."""
         resultado = {}
         for nome, fn in [
+            # renova o token do Instagram (rota login do Instagram) 1x/semana
+            ("instagram_token",    lambda: self.refresh_instagram_token()),
             ("alunos_ativos",      lambda: self.sync_alunos_ativos(pacto)),
             # logo após alunos_ativos: quem conversou no WhatsApp antes de
             # virar aluno ganha lead Pacto hoje — funde o lead do webhook nele
