@@ -3069,9 +3069,6 @@ class CRMClient:
             ("vendas_detalhe_mes", lambda: self.sync_vendas_detalhe_mes(adm)),
             # página Ranking Profs: avaliações físicas por professor
             ("avaliacoes_fisicas", lambda: self.sync_avaliacoes_fisicas(pacto)),
-            # produtos/diárias comprados pela base ativa (visitantes: varredura
-            # completa mensal via menu 54 base=completa)
-            ("vendas_avulsas",     lambda: self.sync_vendas_avulsas(pacto, adm)),
             ("inadimplentes",      lambda: self.sync_inadimplentes(pacto, adm)),
             # base completa (~2000, ~45min): roda de madrugada junto do diario;
             # achou 22% mais parcelas que o subset de risco (medido 2026-07-02)
@@ -3084,6 +3081,12 @@ class CRMClient:
             # 1 request/aluno (~15min na base completa) — alimenta o card do
             # Kanban de Alunos ("Xd sem vir")
             ("ultimo_acesso",      lambda: self.sync_ultimo_acesso(pacto)),
+            # produtos/diárias comprados pela base ativa (visitantes: varredura
+            # completa mensal via menu 54 base=completa). É o passo mais lento
+            # (~75 min) e o menos crítico — fica por ÚLTIMO de propósito: se o
+            # diário estourar o timeout de novo, perde-se só este KPI e não o
+            # enriquecimento de metadata (incidentes 2026-07-06 e 2026-07-08)
+            ("vendas_avulsas",     lambda: self.sync_vendas_avulsas(pacto, adm)),
         ]:
             try:
                 resultado[nome] = fn()

@@ -29,7 +29,12 @@ jobs:
     runs-on: ubuntu-latest
     # 2026-07-06: run estourou os 100 min (1h19 até chegar no ultimo_acesso,
     # que precisa de ~25 min pra base de ~2000) e foi cancelado no meio.
-    timeout-minutes: 150
+    # 2026-07-08: estourou os 150 min (vendas_avulsas sozinho leva ~75 min;
+    # cancelado em 800/1987 do scan de parcelas — consultora_vinculo,
+    # recorrentes e ultimo_acesso ficaram sem rodar e o metadata dos leads
+    # ficou pelado). Diário completo hoje ≈ 4h; repo é público (minutos
+    # ilimitados) e o limite de job do GitHub é 6h.
+    timeout-minutes: 330
     steps:
       - uses: actions/checkout@v4
 
