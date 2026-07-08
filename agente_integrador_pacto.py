@@ -2539,12 +2539,32 @@ class CRMClient:
                 ignore_duplicates=True,
             ).execute()
 
+        # 7. auditoria contra o BI oficial "Conversao de Vendas" do ADM
+        #    (referencia definida pelo usuario em 2026-07-08): boletinVisitaMes
+        #    e o total de BVs do mes — divergencia vira WARNING no log.
+        bi_mes = None
+        try:
+            bi = adm._gw("POST", "/v2-conversao-venda",
+                         json={"data": date.today().isoformat()})
+            jd = json.loads((bi.get("content") or {}).get("jsonDados", "{}"))
+            bi_mes = jd.get("boletinVisitaMes")
+        except Exception as e:
+            log.warning(f"BI conversao-venda indisponivel: {e}")
+        rc = self.sb.table("visitantes_bv").select("id", count="exact").eq(
+            "mes_referencia", mes_atual).limit(1).execute()
+        tabela_mes = rc.count or 0
+        if bi_mes is not None and bi_mes != tabela_mes:
+            log.warning(f"visitantes_bv DIVERGE do BI oficial: tabela={tabela_mes} "
+                        f"x BI boletinVisitaMes={bi_mes} ({mes_atual})")
+
         log.info(f"sync_visitantes_bv: {len(vistos)} na janela, "
                  f"{len(novos)} novos, {len(convertidos) + extra} conversoes, "
-                 f"{len(recuperados)} recuperados fora da HO")
+                 f"{len(recuperados)} recuperados fora da HO, "
+                 f"mes {tabela_mes} x BI {bi_mes}")
         return {"visitantes": len(vistos), "novos": len(novos),
                 "convertidos": len(convertidos) + extra,
-                "recuperados_fora_ho": len(recuperados)}
+                "recuperados_fora_ho": len(recuperados),
+                "tabela_mes": tabela_mes, "bi_boletim_mes": bi_mes}
 
     def sincronizar_leads(self, pacto: "PactoClient", adm: "PactoADMClient") -> dict:
         """Sync rápido de leads — rodar a cada hora."""
