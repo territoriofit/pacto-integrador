@@ -3366,6 +3366,58 @@ class CRMClient:
                  f"geral R$ {total_geral:.2f}")
         return {"linhas": len(rows), "total_geral": round(total_geral, 2)}
 
+    def sync_parcelas_mes_kpi(self, pacto: "PactoClient",
+                              mes: str | None = None) -> dict:
+        """
+        KPIs "Caixa em aberto (vendas do mês)" e "Inadimplência recorrentes"
+        da página Vendas do Mês, pela LÓGICA OFICIAL do usuário (2026-07-09):
+        Relatório Parcelas (zw-boot /parcela-em-aberto/consultar), situação EA,
+        faturamento dentro do mês, vencimento do dia 01 do mês até o dia 10 do
+        MÊS SEGUINTE; regime de recorrência SIM (enum 2) = inadimplência
+        recorrentes, NÃO (enum 3) = caixa em aberto. Validado contra a tela:
+        junho SIM = 8.383,40/25 e NÃO = 13.526,65/12.
+        """
+        mes, fat_ini, fat_fim = self._mes_range_iso(mes)
+        ano, m = int(mes[:4]), int(mes[5:7])
+        prox_ano, prox_m = (ano + 1, 1) if m == 12 else (ano, m + 1)
+        venc_ini = fat_ini
+        venc_fim = f"{prox_ano:04d}-{prox_m:02d}-10T03:00:00.000Z"
+        log.info(f"CRM sync: parcelas em aberto do mês {mes} (venc até {venc_fim[:10]})...")
+
+        def _consulta(recorrencia: int) -> tuple[float, int]:
+            filters = {
+                "situacoes": ["EA"],
+                "dataInicioVencimento": venc_ini,
+                "dataTerminoVencimento": venc_fim,
+                "dataInicioFaturamento": fat_ini,
+                "dataTerminoFaturamento": fat_fim,
+                "parcelasRecorrencia": recorrencia,
+                "considerarParcelasContratosAssinados": False,
+            }
+            base = pacto.base.split("/TreinoWeb")[0] + "/zw-boot"
+            r = requests.get(f"{base}/parcela-em-aberto/consultar",
+                             params={"empresaId": 1, "filters": json.dumps(filters),
+                                     "configs": "{}", "page": 0, "size": 1},
+                             headers={"Authorization": f"Bearer {pacto.jwt_token}",
+                                      "empresaId": "1"}, timeout=90)
+            r.raise_for_status()
+            c = (r.json() or {}).get("content") or {}
+            return (round(float(c.get("valorTotalEmAberto") or 0), 2),
+                    int(c.get("qtdeParcelasEmAberto") or 0))
+
+        inad_valor, inad_qtd = _consulta(2)     # recorrência SIM
+        caixa_valor, caixa_qtd = _consulta(3)   # recorrência NÃO
+        self.sb.table("vendas_mes_kpi").upsert({
+            "tenant_id": self.tenant_id, "mes_referencia": mes,
+            "caixa_aberto_valor": caixa_valor, "caixa_aberto_qtd": caixa_qtd,
+            "inad_recorrente_valor": inad_valor, "inad_recorrente_qtd": inad_qtd,
+            "synced_at": datetime.now(dt_timezone.utc).isoformat(),
+        }, on_conflict="tenant_id,mes_referencia").execute()
+        log.info(f"sync_parcelas_mes_kpi: {mes} — caixa {caixa_valor} ({caixa_qtd}) "
+                 f"/ inad recorrente {inad_valor} ({inad_qtd})")
+        return {"caixa_aberto": caixa_valor, "caixa_qtd": caixa_qtd,
+                "inad_recorrente": inad_valor, "inad_qtd": inad_qtd}
+
     def refresh_instagram_token(self) -> dict:
         """Renova o token da rota 'API com login do Instagram' (config
         INSTAGRAM_LOGIN_TOKEN). Tokens long-lived valem 60 dias; a Meta exige
@@ -3443,6 +3495,7 @@ class CRMClient:
             # comissão por consultora (carteira) + produtos/serviços
             ("comissao_consultora", lambda: self.sync_comissao_consultora(pacto)),
             ("faturamento_produtos", lambda: self.sync_faturamento_produtos(pacto)),
+            ("parcelas_mes_kpi",   lambda: self.sync_parcelas_mes_kpi(pacto)),
             ("inadimplentes",      lambda: self.sync_inadimplentes(pacto, adm)),
             # base completa (~2000, ~45min): roda de madrugada junto do diario;
             # achou 22% mais parcelas que o subset de risco (medido 2026-07-02)
@@ -3887,5 +3940,9 @@ if __name__ == "__main__":
             mes = input("Mês (YYYY-MM, vazio = atual): ").strip() or None
             r = _crm().sync_faturamento_produtos(pacto, mes=mes)
             print(f"\nFaturamento produtos: {r}")
+        elif op == "57":
+            mes = input("Mês (YYYY-MM, vazio = atual): ").strip() or None
+            r = _crm().sync_parcelas_mes_kpi(pacto, mes=mes)
+            print(f"\nParcelas do mês (caixa/inad): {r}")
         else:
             print("Opcao invalida.")
