@@ -3339,6 +3339,10 @@ class CRMClient:
                     continue
                 qtd = valor = 0
                 for p in tp.get("listaProduto") or []:
+                    # cada tipo tem uma linha 'TOTALIZADOR' que repete a soma
+                    # dos produtos — somar junto DOBRA o valor
+                    if (p.get("descricao") or "").strip().upper() == "TOTALIZADOR":
+                        continue
                     for x in p.get("listaProdutoXMes") or []:
                         qtd += x.get("qtd") or 0
                         valor += x.get("valor") or 0.0
