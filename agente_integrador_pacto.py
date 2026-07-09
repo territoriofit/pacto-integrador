@@ -3231,6 +3231,12 @@ class CRMClient:
         header = [str(c or "").strip() for c in rows[0]]
 
         def _col(nome: str, fallback: int) -> int:
+            # match EXATO primeiro: "Consultor" não pode casar com
+            # "Cod. Consultor" (col anterior) — foi o bug que gravou o
+            # CÓDIGO da consultora como nome (95 em vez de Nathalia)
+            for i, h in enumerate(header):
+                if nome.lower() == h.lower().strip():
+                    return i
             for i, h in enumerate(header):
                 if nome.lower() in h.lower():
                     return i
