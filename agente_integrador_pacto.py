@@ -3164,6 +3164,208 @@ class CRMClient:
                  f"R$ {total:.2f} ({erros} erros)")
         return {"vendas": len(rows), "total": round(total, 2), "erros": erros}
 
+    # -- Relatórios oficiais do ADM (zw-boot) — fonte da página Vendas do Mês --
+
+    def _zwboot(self, pacto: "PactoClient", rota: str, filters: dict,
+                timeout: int = 180) -> requests.Response:
+        """GET no serviço zw-boot (mesmo backend dos relatórios do ADM novo).
+        Auth = Bearer do PactoClient + header empresaId (validado 2026-07-08)."""
+        base = pacto.base.split("/TreinoWeb")[0] + "/zw-boot"
+        return requests.get(f"{base}{rota}", params={"filters": json.dumps(filters)},
+                            headers={"Authorization": f"Bearer {pacto.jwt_token}",
+                                     "empresaId": "1"}, timeout=timeout)
+
+    @staticmethod
+    def _mes_range_iso(mes: str | None) -> tuple[str, str, str]:
+        """('YYYY-MM', dataInicio, dataFinal) na convenção EXATA do SPA do
+        ADM: 1º dia e ÚLTIMO dia do mês às 03:00Z (00:00 BRT)."""
+        agora = datetime.now()
+        mes = mes or agora.strftime("%Y-%m")
+        ano, m = int(mes[:4]), int(mes[5:7])
+        prox = date(ano + (1 if m == 12 else 0), 1 if m == 12 else m + 1, 1)
+        ultimo = (prox - timedelta(days=1)).day
+        return (mes, f"{ano:04d}-{m:02d}-01T03:00:00.000Z",
+                f"{ano:04d}-{m:02d}-{ultimo:02d}T03:00:00.000Z")
+
+    _CANON_CONSULTORA = {"kelytta": "Kellyta", "kellyta": "Kellyta",
+                         "nathalia": "Nathalia", "raiane": "Raiane",
+                         "lyandra": "Lyandra", "andré": "André", "andre": "André"}
+
+    def sync_comissao_consultora(self, pacto: "PactoClient",
+                                 mes: str | None = None) -> dict:
+        """
+        Relatório oficial "Comissão para Consultor" (Por Faturamento) do ADM →
+        tabela comissao_consultora. FONTE OFICIAL do resumo por consultora da
+        página Vendas do Mês (pedido do usuário 2026-07-08): planos = contratos
+        distintos, valor = soma dos pagamentos, agrupado pela CONSULTORA DO
+        CONTRATO (carteira). Receita validada contra a tela do ADM (junho:
+        Nathalia 86/89.204,40; Kellyta 58/56.390,80; Raiane 55/55.604,20;
+        André 1/1.794,00).
+        """
+        from io import BytesIO
+        from openpyxl import load_workbook
+
+        mes, data_ini, data_fim = self._mes_range_iso(mes)
+        log.info(f"CRM sync: comissão p/ consultora {mes} (relatório oficial)...")
+        filters = {
+            "empresa": "1", "atendente": None, "consultor": None,
+            "tipoRelatorioEscolhido": 4,  # Por Faturamento (o que o usuário usa)
+            "dataInicio": data_ini, "dataFinal": data_fim,
+            "dataInicioR": None, "dataContratosLancadosAPartir": None,
+            "dataCompetencia": None, "tipoContrato": None,
+            "opcaoImpressao": "CO", "visualizacao": "AP",
+            "tipoValorComissoes": "PORC", "tipoResponsavel": 1,
+            "retirarRecebiveisComPendecia": False,
+            "considerarCompensacaoOriginal": False, "duracoes": [],
+        }
+        r = self._zwboot(pacto, "/comissao-consultor/gerar-relatorio/excel", filters)
+        r.raise_for_status()
+        url = (r.json() or {}).get("content")
+        if not url:
+            raise RuntimeError(f"comissao-consultor sem url de excel: {r.text[:200]}")
+        xls = requests.get(url, timeout=180)
+        xls.raise_for_status()
+
+        wb = load_workbook(BytesIO(xls.content), data_only=True)
+        rows = list(wb.worksheets[0].iter_rows(values_only=True))
+        header = [str(c or "").strip() for c in rows[0]]
+
+        def _col(nome: str, fallback: int) -> int:
+            for i, h in enumerate(header):
+                if nome.lower() in h.lower():
+                    return i
+            return fallback
+        i_cons, i_ctr = _col("Consultor", 6), _col("Contrato", 8)
+        i_tipo, i_pg = _col("Tipo Contrato", 13), _col("ValorPagamento", 27)
+
+        def _valor(v) -> float:
+            if isinstance(v, (int, float)):
+                return float(v)
+            s = str(v or "").replace("R$", "").replace(".", "").replace(",", ".").strip()
+            try:
+                return float(s)
+            except ValueError:
+                return 0.0
+
+        agg: dict[str, dict] = {}
+        for linha in rows[1:]:
+            if not linha or not linha[i_cons]:
+                continue
+            bruto = str(linha[i_cons]).strip()
+            canon = self._CANON_CONSULTORA.get(
+                bruto.split()[0].lower(), " ".join(w.capitalize() for w in bruto.split()[:1]))
+            d = agg.setdefault(canon, {"valor": 0.0, "contratos": set(),
+                                       "ma": set(), "re": set(), "rn": set()})
+            d["valor"] += _valor(linha[i_pg])
+            ctr = linha[i_ctr]
+            if ctr:
+                d["contratos"].add(ctr)
+                t = str(linha[i_tipo] or "").strip().upper()
+                if t in ("MA", "RE", "RN"):
+                    d[t.lower()].add(ctr)
+
+        agora_iso = datetime.now(dt_timezone.utc).isoformat()
+        novas = [{
+            "tenant_id": self.tenant_id, "mes_referencia": mes,
+            "consultora": consultora, "planos": len(d["contratos"]),
+            "valor": round(d["valor"], 2),
+            "planos_ma": len(d["ma"]), "planos_re": len(d["re"]),
+            "planos_rn": len(d["rn"]), "synced_at": agora_iso,
+        } for consultora, d in agg.items()]
+        # delete+insert: consultora que zerou no mês não fica com linha velha
+        self.sb.table("comissao_consultora").delete().eq(
+            "mes_referencia", mes).execute()
+        if novas:
+            self.sb.table("comissao_consultora").insert(novas).execute()
+        total = sum(x["valor"] for x in novas)
+        log.info(f"sync_comissao_consultora: {mes} — {len(novas)} consultoras, "
+                 f"R$ {total:.2f}")
+        return {"consultoras": len(novas), "total": round(total, 2)}
+
+    def sync_faturamento_produtos(self, pacto: "PactoClient",
+                                  mes: str | None = None) -> dict:
+        """
+        Relatório oficial "Faturamento por Período" (zw-boot
+        /faturamento-sintetico/gerar) → tabela faturamento_produtos: produtos e
+        serviços (tudo que NÃO é plano) do mês, geral (consultora NULL) e por
+        consultora responsável (param colaboradorCodigo). Alimenta o KPI
+        "Produtos e serviços" da página Vendas do Mês.
+        """
+        mes, data_ini, data_fim = self._mes_range_iso(mes)
+        log.info(f"CRM sync: faturamento produtos/serviços {mes}...")
+        NAO_PRODUTO = {"mês de referência plano", "mes de referencia plano",
+                       "matrícula, rematrícula, renovação",
+                       "matricula, rematricula, renovacao",
+                       "cheques devolvidos"}
+        # cada checkbox de "Tipos de Produtos" da tela é um boolean no filters
+        # (nomes descobertos 1 a 1 em 2026-07-08: campo errado dá 500)
+        TIPOS_PRODUTO = [
+            "manutencaoModalidade", "trancamento", "aulaAvulsa",
+            "produtoSessao", "acertoCCAluno", "quitacaoCancelamento",
+            "alterarHorario", "bioTotem", "taxaRenegociacao", "produtoEstoque",
+            "desafio", "servico", "creditoPersonal", "diaria", "taxaPersonal",
+            "pgtoSaldoDevedor", "armario", "consultaNutricional", "locacao",
+            "taxaAdesao", "atestado",
+        ]
+
+        # códigos das consultoras (colaboradores ativos, match pelo 1º nome)
+        rc = pacto._req("GET", "/psec/colaboradores/all-simple")
+        consultoras: dict[str, int] = {}
+        for c in rc.get("content") or []:
+            if c.get("situacao") != "ATIVO":
+                continue
+            canon = self._CANON_CONSULTORA.get(
+                (c.get("nome") or "").split()[0].lower())
+            cid = c.get("codigoColaborador") or c.get("id")
+            if canon and cid and canon not in consultoras:
+                consultoras[canon] = int(cid)
+
+        def _coleta(colab_codigo: int | None, consultora: str | None) -> list[dict]:
+            filters = {"empresaId": 1, "dataInicio": data_ini,
+                       "dataTermino": data_fim, "agrupamento": "nomeDuracao"}
+            for t in TIPOS_PRODUTO:
+                filters[t] = True
+            if colab_codigo:
+                filters["colaboradorCodigo"] = colab_codigo
+            r = self._zwboot(pacto, "/faturamento-sintetico/gerar", filters)
+            r.raise_for_status()
+            content = (r.json() or {}).get("content") or {}
+            out = []
+            for tp in content.get("listaTipoProduto") or []:
+                nome_tipo = (tp.get("tipoProduto") or "").strip()
+                if not tp.get("apresentarResultado"):
+                    continue
+                if nome_tipo.lower() in NAO_PRODUTO:
+                    continue
+                qtd = valor = 0
+                for p in tp.get("listaProduto") or []:
+                    for x in p.get("listaProdutoXMes") or []:
+                        qtd += x.get("qtd") or 0
+                        valor += x.get("valor") or 0.0
+                if qtd or valor:
+                    out.append({
+                        "tenant_id": self.tenant_id, "mes_referencia": mes,
+                        "consultora": consultora, "tipo_produto": nome_tipo,
+                        "qtd": qtd, "valor": round(valor, 2),
+                        "synced_at": datetime.now(dt_timezone.utc).isoformat(),
+                    })
+            return out
+
+        rows = _coleta(None, None)
+        for consultora, cid in consultoras.items():
+            try:
+                rows += _coleta(cid, consultora)
+            except Exception as e:
+                log.warning(f"faturamento produtos {consultora}: {e}")
+        self.sb.table("faturamento_produtos").delete().eq(
+            "mes_referencia", mes).execute()
+        if rows:
+            self.sb.table("faturamento_produtos").insert(rows).execute()
+        total_geral = sum(x["valor"] for x in rows if x["consultora"] is None)
+        log.info(f"sync_faturamento_produtos: {mes} — {len(rows)} linhas, "
+                 f"geral R$ {total_geral:.2f}")
+        return {"linhas": len(rows), "total_geral": round(total_geral, 2)}
+
     def refresh_instagram_token(self) -> dict:
         """Renova o token da rota 'API com login do Instagram' (config
         INSTAGRAM_LOGIN_TOKEN). Tokens long-lived valem 60 dias; a Meta exige
@@ -3237,6 +3439,10 @@ class CRMClient:
             ("vendas_detalhe_mes", lambda: self.sync_vendas_detalhe_mes(adm)),
             # página Ranking Profs: avaliações físicas por professor
             ("avaliacoes_fisicas", lambda: self.sync_avaliacoes_fisicas(pacto)),
+            # página Vendas do Mês: relatórios OFICIAIS do ADM (zw-boot) —
+            # comissão por consultora (carteira) + produtos/serviços
+            ("comissao_consultora", lambda: self.sync_comissao_consultora(pacto)),
+            ("faturamento_produtos", lambda: self.sync_faturamento_produtos(pacto)),
             ("inadimplentes",      lambda: self.sync_inadimplentes(pacto, adm)),
             # base completa (~2000, ~45min): roda de madrugada junto do diario;
             # achou 22% mais parcelas que o subset de risco (medido 2026-07-02)
@@ -3673,5 +3879,13 @@ if __name__ == "__main__":
             base = input("Base (ativos/completa, vazio = ativos): ").strip() or "ativos"
             r = _crm().sync_vendas_avulsas(pacto, adm, mes=mes, base=base)
             print(f"\nVendas avulsas: {r}")
+        elif op == "55":
+            mes = input("Mês (YYYY-MM, vazio = atual): ").strip() or None
+            r = _crm().sync_comissao_consultora(pacto, mes=mes)
+            print(f"\nComissão consultora: {r}")
+        elif op == "56":
+            mes = input("Mês (YYYY-MM, vazio = atual): ").strip() or None
+            r = _crm().sync_faturamento_produtos(pacto, mes=mes)
+            print(f"\nFaturamento produtos: {r}")
         else:
             print("Opcao invalida.")
