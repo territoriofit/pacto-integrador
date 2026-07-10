@@ -3380,21 +3380,44 @@ class CRMClient:
                               mes: str | None = None) -> dict:
         """
         KPIs "Caixa em aberto (vendas do mês)" e "Inadimplência recorrentes"
-        da página Vendas do Mês, pela LÓGICA OFICIAL do usuário (2026-07-09):
-        Relatório Parcelas (zw-boot /parcela-em-aberto/consultar), situação EA,
-        faturamento dentro do mês, vencimento do dia 01 do mês até o dia 10 do
-        MÊS SEGUINTE; regime de recorrência SIM (enum 2) = inadimplência
-        recorrentes, NÃO (enum 3) = caixa em aberto. Validado contra a tela:
-        junho SIM = 8.383,40/25 e NÃO = 13.526,65/12.
+        da página Vendas do Mês. Fonte: Relatório Parcelas (zw-boot
+        /parcela-em-aberto/consultar), situação EA, faturamento dentro do mês,
+        vencimento do dia 01 do mês até o dia 10 do MÊS SEGUINTE; recorrência
+        SIM (enum 2) = inadimplência recorrentes, NÃO (enum 3) = caixa aberto.
+
+        REGRA 2026-07-10 (pedido do usuário — caso Denis de Aquino): parcela
+        FUTURA não conta. Só entra parcela VENCIDA (dataVencimento < hoje);
+        na inadimplência recorrente o aluno ainda precisa ter plano recorrente
+        ATIVO (status cliente/inadimplente no CRM). Por isso o cálculo passou
+        dos totais prontos do relatório para as linhas, filtradas aqui.
         """
         mes, fat_ini, fat_fim = self._mes_range_iso(mes)
         ano, m = int(mes[:4]), int(mes[5:7])
         prox_ano, prox_m = (ano + 1, 1) if m == 12 else (ano, m + 1)
         venc_ini = fat_ini
         venc_fim = f"{prox_ano:04d}-{prox_m:02d}-10T03:00:00.000Z"
-        log.info(f"CRM sync: parcelas em aberto do mês {mes} (venc até {venc_fim[:10]})...")
+        hoje = date.today().isoformat()
+        log.info(f"CRM sync: parcelas em aberto do mês {mes} "
+                 f"(somente vencidas < {hoje})...")
 
-        def _consulta(recorrencia: int) -> tuple[float, int]:
+        # Matrículas com contrato ativo (cliente/inadimplente) — normalizadas
+        # sem zeros à esquerda ("019988" do relatório vs 19988 do sync diário)
+        ativos: set[str] = set()
+        ini = 0
+        while True:
+            resp = self.sb.table("leads").select(
+                "metadata->>pacto_matricula").in_(
+                "status", ["cliente", "inadimplente"]).range(ini, ini + 999).execute()
+            rows = resp.data or []
+            for row in rows:
+                v = str(row.get("pacto_matricula") or "").strip()
+                if v.isdigit():
+                    ativos.add(str(int(v)))
+            if len(rows) < 1000:
+                break
+            ini += 1000
+
+        def _consulta(recorrencia: int) -> list[dict]:
             filters = {
                 "situacoes": ["EA"],
                 "dataInicioVencimento": venc_ini,
@@ -3407,16 +3430,28 @@ class CRMClient:
             base = pacto.base.split("/TreinoWeb")[0] + "/zw-boot"
             r = requests.get(f"{base}/parcela-em-aberto/consultar",
                              params={"empresaId": 1, "filters": json.dumps(filters),
-                                     "configs": "{}", "page": 0, "size": 1},
+                                     "configs": "{}", "page": 0, "size": 500},
                              headers={"Authorization": f"Bearer {pacto.jwt_token}",
                                       "empresaId": "1"}, timeout=90)
             r.raise_for_status()
             c = (r.json() or {}).get("content") or {}
-            return (round(float(c.get("valorTotalEmAberto") or 0), 2),
-                    int(c.get("qtdeParcelasEmAberto") or 0))
+            return c.get("parcelas") or c.get("lista") or []
 
-        inad_valor, inad_qtd = _consulta(2)     # recorrência SIM
-        caixa_valor, caixa_qtd = _consulta(3)   # recorrência NÃO
+        def _vencida(p: dict) -> bool:
+            return str(p.get("dataVencimento") or "")[:10] < hoje
+
+        def _mat(p: dict) -> str:
+            v = str(p.get("matricula") or "").strip()
+            return str(int(v)) if v.isdigit() else v
+
+        inad_rows = [p for p in _consulta(2)
+                     if _vencida(p) and _mat(p) in ativos]
+        caixa_rows = [p for p in _consulta(3) if _vencida(p)]
+
+        inad_valor = round(sum(float(p.get("valor") or 0) for p in inad_rows), 2)
+        inad_qtd = len(inad_rows)
+        caixa_valor = round(sum(float(p.get("valor") or 0) for p in caixa_rows), 2)
+        caixa_qtd = len(caixa_rows)
         self.sb.table("vendas_mes_kpi").upsert({
             "tenant_id": self.tenant_id, "mes_referencia": mes,
             "caixa_aberto_valor": caixa_valor, "caixa_aberto_qtd": caixa_qtd,
