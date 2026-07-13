@@ -3504,6 +3504,10 @@ class CRMClient:
     def sincronizar_diario(self, pacto: "PactoClient", adm: "PactoADMClient") -> dict:
         """Sync completo — rodar uma vez ao dia."""
         resultado = {}
+        # mês anterior: os KPIs mensais dele continuam vivos depois da virada
+        # (parcelas pagas, estornos, lançamentos retroativos) — sem re-sync o
+        # CRM mostra foto congelada do fechamento (bug do caixa 13/07/26)
+        mes_ant = (date.today().replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
         for nome, fn in [
             # renova o token do Instagram (rota login do Instagram) 1x/semana
             ("instagram_token",    lambda: self.refresh_instagram_token()),
@@ -3541,12 +3545,12 @@ class CRMClient:
             ("comissao_consultora", lambda: self.sync_comissao_consultora(pacto)),
             ("faturamento_produtos", lambda: self.sync_faturamento_produtos(pacto)),
             ("parcelas_mes_kpi",   lambda: self.sync_parcelas_mes_kpi(pacto)),
-            # mês ANTERIOR também: o caixa em aberto dele continua vivo (parcelas
-            # de junho seguem sendo pagas em julho) — sem isso a página Vendas do
-            # Mês mostra uma foto congelada do mês fechado (bug achado 13/07/26:
-            # junho travado em 13.526,65 desde 09/07 vs 6.109,45 real no Pacto)
-            ("parcelas_mes_kpi_ant", lambda: self.sync_parcelas_mes_kpi(
-                pacto, mes=(date.today().replace(day=1) - timedelta(days=1)).strftime("%Y-%m"))),
+            # mês ANTERIOR também (varredura 13/07/26: TODAS as tabelas mensais
+            # estavam com junho congelado no snapshot de 07-09/07):
+            ("comissao_consultora_ant", lambda: self.sync_comissao_consultora(pacto, mes=mes_ant)),
+            ("faturamento_produtos_ant", lambda: self.sync_faturamento_produtos(pacto, mes=mes_ant)),
+            ("parcelas_mes_kpi_ant", lambda: self.sync_parcelas_mes_kpi(pacto, mes=mes_ant)),
+            ("avaliacoes_fisicas_ant", lambda: self.sync_avaliacoes_fisicas(pacto, mes=mes_ant)),
             ("inadimplentes",      lambda: self.sync_inadimplentes(pacto, adm)),
             # base completa (~2000, ~45min): roda de madrugada junto do diario;
             # achou 22% mais parcelas que o subset de risco (medido 2026-07-02)
