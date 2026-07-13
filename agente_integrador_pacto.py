@@ -3541,6 +3541,12 @@ class CRMClient:
             ("comissao_consultora", lambda: self.sync_comissao_consultora(pacto)),
             ("faturamento_produtos", lambda: self.sync_faturamento_produtos(pacto)),
             ("parcelas_mes_kpi",   lambda: self.sync_parcelas_mes_kpi(pacto)),
+            # mês ANTERIOR também: o caixa em aberto dele continua vivo (parcelas
+            # de junho seguem sendo pagas em julho) — sem isso a página Vendas do
+            # Mês mostra uma foto congelada do mês fechado (bug achado 13/07/26:
+            # junho travado em 13.526,65 desde 09/07 vs 6.109,45 real no Pacto)
+            ("parcelas_mes_kpi_ant", lambda: self.sync_parcelas_mes_kpi(
+                pacto, mes=(date.today().replace(day=1) - timedelta(days=1)).strftime("%Y-%m"))),
             ("inadimplentes",      lambda: self.sync_inadimplentes(pacto, adm)),
             # base completa (~2000, ~45min): roda de madrugada junto do diario;
             # achou 22% mais parcelas que o subset de risco (medido 2026-07-02)
