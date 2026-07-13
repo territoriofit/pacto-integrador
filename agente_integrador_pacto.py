@@ -3417,16 +3417,18 @@ class CRMClient:
                 break
             ini += 1000
 
-        def _consulta(recorrencia: int) -> list[dict]:
+        def _consulta(recorrencia: int, venc_i: str | None = None,
+                      venc_f: str | None = None, com_faturamento: bool = True) -> list[dict]:
             filters = {
                 "situacoes": ["EA"],
-                "dataInicioVencimento": venc_ini,
-                "dataTerminoVencimento": venc_fim,
-                "dataInicioFaturamento": fat_ini,
-                "dataTerminoFaturamento": fat_fim,
+                "dataInicioVencimento": venc_i or venc_ini,
+                "dataTerminoVencimento": venc_f or venc_fim,
                 "parcelasRecorrencia": recorrencia,
                 "considerarParcelasContratosAssinados": False,
             }
+            if com_faturamento:
+                filters["dataInicioFaturamento"] = fat_ini
+                filters["dataTerminoFaturamento"] = fat_fim
             base = pacto.base.split("/TreinoWeb")[0] + "/zw-boot"
             r = requests.get(f"{base}/parcela-em-aberto/consultar",
                              params={"empresaId": 1, "filters": json.dumps(filters),
@@ -3448,6 +3450,18 @@ class CRMClient:
                      if _vencida(p) and _mat(p) in ativos]
         caixa_rows = [p for p in _consulta(3) if _vencida(p)]
 
+        # Inadimplência recorrente DO MÊS (régua do André 13/07/26): parcelas EA
+        # de recorrência com VENCIMENTO de 01 do mês até hoje (mês fechado: o
+        # mês inteiro), SEM filtro de faturamento e sem exigir aluno ativo —
+        # espelho exato do relatório de Parcelas do Pacto.
+        prox_mes_ini = f"{prox_ano:04d}-{prox_m:02d}-01T03:00:00.000Z"
+        hoje_iso = f"{hoje}T03:00:00.000Z"
+        rec_mes_fim = min(hoje_iso, prox_mes_ini)
+        rec_mes_rows = _consulta(2, venc_i=venc_ini, venc_f=rec_mes_fim,
+                                 com_faturamento=False)
+        rec_mes_valor = round(sum(float(p.get("valor") or 0) for p in rec_mes_rows), 2)
+        rec_mes_qtd = len(rec_mes_rows)
+
         inad_valor = round(sum(float(p.get("valor") or 0) for p in inad_rows), 2)
         inad_qtd = len(inad_rows)
         caixa_valor = round(sum(float(p.get("valor") or 0) for p in caixa_rows), 2)
@@ -3456,12 +3470,15 @@ class CRMClient:
             "tenant_id": self.tenant_id, "mes_referencia": mes,
             "caixa_aberto_valor": caixa_valor, "caixa_aberto_qtd": caixa_qtd,
             "inad_recorrente_valor": inad_valor, "inad_recorrente_qtd": inad_qtd,
+            "inad_rec_mes_valor": rec_mes_valor, "inad_rec_mes_qtd": rec_mes_qtd,
             "synced_at": datetime.now(dt_timezone.utc).isoformat(),
         }, on_conflict="tenant_id,mes_referencia").execute()
         log.info(f"sync_parcelas_mes_kpi: {mes} — caixa {caixa_valor} ({caixa_qtd}) "
-                 f"/ inad recorrente {inad_valor} ({inad_qtd})")
+                 f"/ inad recorrente {inad_valor} ({inad_qtd}) "
+                 f"/ inad rec mês {rec_mes_valor} ({rec_mes_qtd})")
         return {"caixa_aberto": caixa_valor, "caixa_qtd": caixa_qtd,
-                "inad_recorrente": inad_valor, "inad_qtd": inad_qtd}
+                "inad_recorrente": inad_valor, "inad_qtd": inad_qtd,
+                "inad_rec_mes": rec_mes_valor, "inad_rec_mes_qtd": rec_mes_qtd}
 
     def refresh_instagram_token(self) -> dict:
         """Renova o token da rota 'API com login do Instagram' (config
