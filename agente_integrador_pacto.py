@@ -3294,8 +3294,11 @@ class CRMClient:
         Relatório oficial "Faturamento por Período" (zw-boot
         /faturamento-sintetico/gerar) → tabela faturamento_produtos: produtos e
         serviços (tudo que NÃO é plano) do mês, geral (consultora NULL) e por
-        consultora responsável (param colaboradorCodigo). Alimenta o KPI
-        "Produtos e serviços" da página Vendas do Mês.
+        RESPONSÁVEL LANÇAMENTO CONTRATO (param operadorCodigo — o filtro da
+        tela; colaboradorCodigo é o "Consultor responsável" e deixava
+        Kellyta/Nathalia/Raiane zeradas). Split validado 2026-07-15: soma das
+        operadoras == geral. Alimenta o KPI "Produtos e serviços" da página
+        Vendas do Mês e a coluna do Ranking.
         """
         mes, data_ini, data_fim = self._mes_range_iso(mes)
         log.info(f"CRM sync: faturamento produtos/serviços {mes}...")
@@ -3314,25 +3317,30 @@ class CRMClient:
             "taxaAdesao", "atestado",
         ]
 
-        # códigos das consultoras (colaboradores ativos, match pelo 1º nome)
-        rc = pacto._req("GET", "/psec/colaboradores/all-simple")
+        # códigos de OPERADOR (≠ código de colaborador!) via o mesmo lookup da
+        # tela; match pelo 1º nome canônico (jun/2026: André=3, Nathalia=95,
+        # Lyandra=123, Raiane=187, Kelytta=198)
+        base = pacto.base.split("/TreinoWeb")[0] + "/zw-boot"
+        rc = requests.get(
+            f"{base}/faturamento-sintetico/consultar-operador",
+            params={"empresaId": 1, "searchValue": ""},
+            headers={"Authorization": f"Bearer {pacto.jwt_token}",
+                     "empresaId": "1"}, timeout=60).json()
         consultoras: dict[str, int] = {}
         for c in rc.get("content") or []:
-            if c.get("situacao") != "ATIVO":
-                continue
             canon = self._CANON_CONSULTORA.get(
                 (c.get("nome") or "").split()[0].lower())
-            cid = c.get("codigoColaborador") or c.get("id")
-            if canon and cid and canon not in consultoras:
-                consultoras[canon] = int(cid)
+            cod = c.get("codigo")
+            if canon and cod and canon not in consultoras:
+                consultoras[canon] = int(cod)
 
-        def _coleta(colab_codigo: int | None, consultora: str | None) -> list[dict]:
+        def _coleta(operador_codigo: int | None, consultora: str | None) -> list[dict]:
             filters = {"empresaId": 1, "dataInicio": data_ini,
                        "dataTermino": data_fim, "agrupamento": "nomeDuracao"}
             for t in TIPOS_PRODUTO:
                 filters[t] = True
-            if colab_codigo:
-                filters["colaboradorCodigo"] = colab_codigo
+            if operador_codigo:
+                filters["operadorCodigo"] = operador_codigo
             r = self._zwboot(pacto, "/faturamento-sintetico/gerar", filters)
             r.raise_for_status()
             content = (r.json() or {}).get("content") or {}
