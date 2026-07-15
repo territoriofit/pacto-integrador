@@ -3409,18 +3409,23 @@ class CRMClient:
                  f"(somente vencidas < {hoje})...")
 
         # Matrículas com contrato ativo (cliente/inadimplente) — normalizadas
-        # sem zeros à esquerda ("019988" do relatório vs 19988 do sync diário)
+        # sem zeros à esquerda ("019988" do relatório vs 19988 do sync diário).
+        # De quebra, matrícula → consultora (vínculo) pro split do caixa.
         ativos: set[str] = set()
+        mat2cons: dict[str, str] = {}
         ini = 0
         while True:
             resp = self.sb.table("leads").select(
-                "metadata->>pacto_matricula").in_(
+                "metadata->>pacto_matricula,metadata->>consultora").in_(
                 "status", ["cliente", "inadimplente"]).range(ini, ini + 999).execute()
             rows = resp.data or []
             for row in rows:
                 v = str(row.get("pacto_matricula") or "").strip()
                 if v.isdigit():
                     ativos.add(str(int(v)))
+                    cons = (row.get("consultora") or "").strip()
+                    if cons:
+                        mat2cons[str(int(v))] = cons
             if len(rows) < 1000:
                 break
             ini += 1000
@@ -3474,9 +3479,18 @@ class CRMClient:
         inad_qtd = len(inad_rows)
         caixa_valor = round(sum(float(p.get("valor") or 0) for p in caixa_rows), 2)
         caixa_qtd = len(caixa_rows)
+        # split do caixa oficial por consultora (vínculo do aluno; sem vínculo
+        # = "Outros") — desconto da coluna Total da Vendas do Mês
+        caixa_cons: dict[str, dict] = {}
+        for p in caixa_rows:
+            c = mat2cons.get(_mat(p)) or "Outros"
+            d = caixa_cons.setdefault(c, {"valor": 0.0, "qtd": 0})
+            d["valor"] = round(d["valor"] + float(p.get("valor") or 0), 2)
+            d["qtd"] += 1
         self.sb.table("vendas_mes_kpi").upsert({
             "tenant_id": self.tenant_id, "mes_referencia": mes,
             "caixa_aberto_valor": caixa_valor, "caixa_aberto_qtd": caixa_qtd,
+            "caixa_consultoras": caixa_cons,
             "inad_recorrente_valor": inad_valor, "inad_recorrente_qtd": inad_qtd,
             "inad_rec_mes_valor": rec_mes_valor, "inad_rec_mes_qtd": rec_mes_qtd,
             "synced_at": datetime.now(dt_timezone.utc).isoformat(),
