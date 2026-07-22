@@ -18,6 +18,35 @@ load_dotenv(Path(__file__).parent / ".env.integracao")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
+
+def _montar_ca_bundle() -> None:
+    """
+    O apigw.pactosolucoes.com.br NAO envia o certificado intermediario na
+    cadeia TLS (e o load balancer alterna entre um cert da Starfield Secure
+    CA G2 e um da Starfield TLS Intermediate R1v1 — diagnostico 2026-07-22).
+    No Windows o proprio SO baixa o intermediario (AIA) e funciona; no Linux
+    do GitHub Actions a verificacao falha. certs/pacto-chain-extra.pem tem os
+    2 intermediarios + a raiz TLS R1 (ausente no certifi); aqui montamos um
+    bundle combinado e apontamos o requests pra ele via REQUESTS_CA_BUNDLE.
+    """
+    if os.environ.get("REQUESTS_CA_BUNDLE"):
+        return
+    extra = Path(__file__).parent / "certs" / "pacto-chain-extra.pem"
+    if not extra.exists():
+        return
+    try:
+        import certifi
+        import tempfile
+        combo = Path(tempfile.gettempdir()) / "pacto_ca_bundle.pem"
+        combo.write_bytes(Path(certifi.where()).read_bytes()
+                          + b"\n" + extra.read_bytes())
+        os.environ["REQUESTS_CA_BUNDLE"] = str(combo)
+    except Exception as e:  # sem certifi/temp: segue com o bundle padrao
+        log.warning(f"CA bundle extra nao aplicado: {e}")
+
+
+_montar_ca_bundle()
+
 EXPORT_DIR = Path(r"G:\Meu Drive\André Obsidian\André Obsidian\09 - Dados Pacto")
 EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 
