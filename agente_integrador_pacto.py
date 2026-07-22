@@ -2297,6 +2297,20 @@ class CRMClient:
 
     # -- Orquestradores por frequência -----------------------------------------
 
+    def _canon_consultor(self, nome: str | None) -> str | None:
+        """
+        Nome de consultor pra exibição: se o 1º nome é de uma consultora
+        conhecida, usa o canônico curto (Kellyta/Nathalia/Raiane/Lyandra —
+        mesmo padrão de Renovação/Agendamentos); senão, nome completo Title
+        Case. Evita duplicata tipo 'Lyandra' x 'Lyandra Crivellari Do
+        Nascimento' no resumo da página Visitantes (bug 2026-07-22).
+        """
+        n = (nome or "").strip()
+        if not n:
+            return None
+        primeiro = n.split()[0].lower()
+        return self._CONSULTORA_CANON.get(primeiro, n.title())
+
     def sync_visitantes_bv(self, adm: "PactoADMClient", dias: int = 45) -> dict:
         """
         Relatorio 'Conversao de Vendas - BV' por mes (tabela visitantes_bv).
@@ -2361,8 +2375,8 @@ class CRMClient:
                             "matricula":      v.get("matricula"),
                             # detalhada devolve codigo de 2 letras: VI/AT/IN
                             "situacao_pacto": (v.get("situacao") or "").upper(),
-                            # Title Case: unifica 'ANDRÉ TREVIZAN' e 'André Trevizan'
-                            "consultor":      ((v.get("consultora") or v.get("nomeColaborador") or "").title() or None),
+                            # canônico: unifica 'LYANDRA CRIVELLARI...' e 'Lyandra'
+                            "consultor":      self._canon_consultor(v.get("consultora") or v.get("nomeColaborador")),
                             "data_visita":    dv,
                         }
             cur = prox
@@ -2517,7 +2531,7 @@ class CRMClient:
                     "matricula":      c.get("matricula"),
                     "situacao":       "Ativo" if convertido else "Visitante",
                     "tipo_bv":        "Rematricula" if (lead or {}).get("status") == "inativo" else "Matricula",
-                    "consultor":      (consultor.title() or None),
+                    "consultor":      self._canon_consultor(consultor),
                     "data_visita":    dv,
                     "mes_referencia": dv[:7],
                     "convertido_em":  agora if convertido else None,
@@ -2555,7 +2569,7 @@ class CRMClient:
                 "matricula":      c.get("matricula"),
                 "situacao":       "Ativo",
                 "tipo_bv":        "Rematricula" if v.get("tipo") == "RE" else "Matricula",
-                "consultor":      ((v.get("consultora_vinculo") or v.get("responsavel_raw") or "").title() or None),
+                "consultor":      self._canon_consultor(v.get("consultora_vinculo") or v.get("responsavel_raw")),
                 "data_visita":    (v.get("data_venda") or date.today().isoformat())[:10],
                 "mes_referencia": mes_atual,
                 "convertido_em":  agora,
