@@ -1,0 +1,58 @@
+# Sync FREQUENTE Pacto -> CRM Territorio Fit (quase tempo real)
+#
+# Roda a cada 10 minutos (minutos :04 :14 :24 ... — fora de :00/:30, horarios
+# congestionados do scheduler do Actions; na pratica o GitHub atrasa alguns
+# minutos, entao a cadencia real fica ~10-15 min). Job leve (~2-4 min):
+#   - vendas: contratos novos (walker) + detalhe das vendas recem-chegadas
+#   - faturamento oficial: comissao p/ consultora + produtos/servicos/diarias
+#   - visitas: visitantes 24h + relatorio BV (novos + conversoes)
+#   - conversao: visitante que comprou plano vira aluno ativo na hora
+#   - inadimplencia: parcelas atrasadas via relatorio rapido do zw-boot
+#     (1-2 requests; substitui intraday o scan de ~45 min do diario)
+#   - KPIs do mes: caixa em aberto / inadimplencia recorrente
+#
+# SUBSTITUI o sync-horario.yml (removido em 2026-07-22 — os passos dele
+# estao inclusos aqui). O sync-diario.yml continua dono do trabalho pesado
+# (alunos, metadata, scans longos, meses anteriores).
+#
+# Repo publico: minutos de Actions ilimitados/gratis (~144 runs/dia ok).
+# Secrets necessarios: os mesmos do sync-diario.yml.
+
+name: Sync frequente Pacto -> CRM
+
+on:
+  schedule:
+    - cron: "4,14,24,34,44,54 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: sync-frequente
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: .github/workflows/sync-frequente.yml
+
+      - name: Instalar dependencias
+        run: pip install requests python-dotenv supabase openpyxl
+
+      - name: Sync frequente (vendas + faturamento + visitas + inadimplencia)
+        env:
+          PACTO_TOKEN: ${{ secrets.PACTO_TOKEN }}
+          PACTO_CHAVE: ${{ secrets.PACTO_CHAVE }}
+          PACTO_EMPRESA_ID: ${{ secrets.PACTO_EMPRESA_ID }}
+          PACTO_CTX: ${{ secrets.PACTO_CTX }}
+          PACTO_USER: ${{ secrets.PACTO_USER }}
+          PACTO_PWD: ${{ secrets.PACTO_PWD }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          CRM_TENANT_ID: ${{ secrets.CRM_TENANT_ID }}
+        run: python agente_integrador_pacto.py --sync-frequente

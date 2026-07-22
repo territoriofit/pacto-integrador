@@ -2906,7 +2906,8 @@ class CRMClient:
         return {"novos": len(rows)}
 
     def sync_vendas_detalhe_mes(self, adm: "PactoADMClient",
-                                mes: str | None = None) -> dict:
+                                mes: str | None = None,
+                                apenas_sem_detalhe: bool = False) -> dict:
         """
         Enriquece as vendas do mês (vendas_pacto) para a página Vendas do Mês:
           - codigo_cliente: match do nome_cliente com leads (mesma fonte Pacto)
@@ -2917,12 +2918,17 @@ class CRMClient:
           - caixa_aberto / parcelas_abertas: soma das parcelas NÃO pagas do
             próprio contrato (GET /parcelas/{codigoPessoa})
         Roda no diário APÓS sync_vendas_pacto. ~3 requests por venda do mês.
+        apenas_sem_detalhe=True (sync frequente): só as vendas recém-chegadas
+        do walker, ainda sem detalhe_synced_at — o mês inteiro fica pro diário.
         """
         mes = mes or datetime.now().strftime("%Y-%m")
         log.info(f"CRM sync: detalhe das vendas do mês {mes}...")
-        r = (self.sb.table("vendas_pacto").select(
+        q = (self.sb.table("vendas_pacto").select(
                 "id,codigo_contrato,codigo_pessoa,nome_cliente,codigo_cliente")
-             .eq("mes_referencia", mes).execute())
+             .eq("mes_referencia", mes))
+        if apenas_sem_detalhe:
+            q = q.is_("detalhe_synced_at", "null")
+        r = q.execute()
         vendas = r.data or []
         if not vendas:
             return {"vendas": 0}
@@ -3502,6 +3508,208 @@ class CRMClient:
                 "inad_recorrente": inad_valor, "inad_qtd": inad_qtd,
                 "inad_rec_mes": rec_mes_valor, "inad_rec_mes_qtd": rec_mes_qtd}
 
+    # -- Sync frequente (quase tempo real) -------------------------------------
+
+    def sync_parcelas_atrasadas_rapido(self, pacto: "PactoClient") -> dict:
+        """
+        Versão RÁPIDA (intraday) do sync_parcelas_atrasadas: em vez do scan
+        aluno a aluno (~45 min), lê o relatório oficial de Parcelas do zw-boot
+        (/parcela-em-aberto/consultar, situação EA, só vencidas) em 1-2
+        requests. Validado 2026-07-22 contra a tabela: 96/97 em comum — as
+        diferenças eram exatamente as parcelas novas/regularizadas do dia.
+
+        Bônus sobre o scan diário: o relatório traz motivoRetorno (motivo REAL
+        da falha de cobrança) e recorrencia (Sim/Não) direto na linha.
+
+        Mesmas garantias do diário: upsert + remoção das regularizadas +
+        flag/limpeza no metadata dos leads. Parcela sem lead correspondente
+        (matrícula ainda não sincronizada) é pulada — o diário a pega.
+        Obs: se rodar DURANTE o scan do diário, uma linha recém-gravada por
+        ele pode ser apagada por 10 min (o run frequente seguinte repõe).
+        """
+        hoje = date.today()
+        scan_start = datetime.now().isoformat()
+        log.info("CRM sync: parcelas atrasadas (relatório rápido zw-boot)...")
+
+        filters = {
+            "situacoes": ["EA"],
+            "dataInicioVencimento": "2000-01-01T03:00:00.000Z",
+            "dataTerminoVencimento": f"{hoje.isoformat()}T03:00:00.000Z",
+            "parcelasRecorrencia": 0,  # ambas (2=sim, 3=não)
+            "considerarParcelasContratosAssinados": False,
+        }
+        base = pacto.base.split("/TreinoWeb")[0] + "/zw-boot"
+        parcelas: list[dict] = []
+        page = 0
+        while True:
+            r = requests.get(f"{base}/parcela-em-aberto/consultar",
+                             params={"empresaId": 1, "filters": json.dumps(filters),
+                                     "configs": "{}", "page": page, "size": 500},
+                             headers={"Authorization": f"Bearer {pacto.jwt_token}",
+                                      "empresaId": "1"}, timeout=90)
+            r.raise_for_status()
+            lote = ((r.json() or {}).get("content") or {}).get("parcelas") or []
+            parcelas += lote
+            if len(lote) < 500:
+                break
+            page += 1
+        if not parcelas:
+            log.warning("parcelas rápido: relatório vazio — nada gravado "
+                        "(sem remoção em massa por segurança)")
+            return {"parcelas": 0}
+
+        # matrícula normalizada (relatório vem zero-padded '018505') -> lead
+        mats: set[str] = set()
+        for p in parcelas:
+            m = str(p.get("matricula") or "").strip()
+            if m.isdigit():
+                mats.add(str(int(m)))
+        variantes = list(mats | {m.zfill(6) for m in mats})
+        lead_por_mat: dict[str, dict] = {}
+        for i in range(0, len(variantes), 100):
+            r = (self.sb.table("leads").select("id,name,status,metadata")
+                 .eq("source", "pacto_aluno")
+                 .in_("metadata->>pacto_matricula", variantes[i:i + 100]).execute())
+            for row in (r.data or []):
+                mv = str((row.get("metadata") or {}).get("pacto_matricula") or "").strip()
+                if mv.isdigit():
+                    lead_por_mat[str(int(mv))] = row
+
+        por_lead: dict[str, dict] = {}
+        rows_parc: list[dict] = []
+        sem_lead = 0
+        for p in parcelas:
+            m = str(p.get("matricula") or "").strip()
+            lead = lead_por_mat.get(str(int(m))) if m.isdigit() else None
+            if not lead:
+                sem_lead += 1
+                continue
+            item = por_lead.setdefault(lead["id"], {"lead": lead, "parcelas": []})
+            item["parcelas"].append(p)
+            venc = str(p.get("dataVencimento") or "")[:10]
+            cod_cliente = (lead.get("metadata") or {}).get("pacto_codigo")
+            rows_parc.append({
+                "id": str(uuid.uuid5(self._PARCELA_NS,
+                                     f"{self.tenant_id}:{p.get('codigoParcela')}")),
+                "tenant_id":       self.tenant_id,
+                "lead_id":         lead["id"],
+                "nome_aluno":      p.get("nome"),
+                "matricula":       str(int(m)) if m.isdigit() else m,
+                "codigo_cliente":  int(cod_cliente) if cod_cliente else None,
+                "parcela_codigo":  p.get("codigoParcela"),
+                "contrato":        p.get("contrato"),
+                "descricao":       p.get("descricaoParcela"),
+                "valor":           p.get("valor"),
+                "data_vencimento": venc or None,
+                "dias_atraso":     ((hoje - date.fromisoformat(venc)).days
+                                    if venc else None),
+                "nr_tentativas":   p.get("nrTentativas") or 0,
+                "motivo_falha":    (p.get("motivoRetorno") or "").strip() or None,
+                "recorrente":      str(p.get("recorrencia") or "").strip().lower() == "sim",
+                "synced_at":       scan_start,
+            })
+
+        for i in range(0, len(rows_parc), 200):
+            self.sb.table("parcelas_atrasadas").upsert(rows_parc[i:i + 200]).execute()
+        # remove as que não apareceram neste run (pagas/renegociadas hoje)
+        self.sb.table("parcelas_atrasadas").delete().eq(
+            "tenant_id", self.tenant_id).lt("synced_at", scan_start).execute()
+
+        # leads: marca inadimplente + resumo (merge, mesmo padrão do diário)
+        rows_leads = []
+        for lid, item in por_lead.items():
+            lead = item["lead"]
+            ps = sorted(item["parcelas"],
+                        key=lambda p: str(p.get("dataVencimento") or ""))
+            p0 = ps[0]  # mais antiga
+            venc = str(p0.get("dataVencimento") or "")[:10]
+            meta = dict(lead.get("metadata") or {})
+            meta["alerta"] = "inadimplente"
+            meta["parcela_atrasada"] = {
+                "codigo":                 p0.get("codigoParcela"),
+                "vencimento":             venc or None,
+                "dias_atraso":            ((hoje - date.fromisoformat(venc)).days
+                                           if venc else None),
+                "nr_tentativas":          p0.get("nrTentativas") or 0,
+                "valor":                  p0.get("valor"),
+                "motivo_falha":           (p0.get("motivoRetorno") or "").strip() or None,
+                "matricula":              str(meta.get("pacto_matricula") or "") or None,
+                "total_parcelas_abertas": len(ps),
+            }
+            rows_leads.append({
+                "id":        lid,
+                "name":      lead.get("name"),
+                "status":    "inadimplente",
+                "metadata":  meta,
+                "tenant_id": self.tenant_id,
+            })
+        n_leads = self._upsert_batch(rows_leads)
+
+        # limpa a flag de quem regularizou (pagou durante o dia)
+        r = self.sb.table("leads").select("id,name,status,metadata").eq(
+            "tenant_id", self.tenant_id
+        ).eq("source", "pacto_aluno").not_.is_(
+            "metadata->parcela_atrasada", "null"
+        ).execute()
+        limpos = []
+        for lead in (r.data or []):
+            if lead["id"] in por_lead:
+                continue
+            meta = dict(lead.get("metadata") or {})
+            meta.pop("parcela_atrasada", None)
+            if meta.get("alerta") == "inadimplente":
+                meta.pop("alerta", None)
+            limpos.append({
+                "id":        lead["id"],
+                "name":      lead.get("name"),
+                "status":    ("cliente" if lead.get("status") == "inadimplente"
+                              else lead.get("status")),
+                "metadata":  meta,
+                "tenant_id": self.tenant_id,
+            })
+        self._upsert_batch(limpos)
+
+        resultado = {"parcelas": len(rows_parc), "alunos": len(por_lead),
+                     "sem_lead": sem_lead, "leads_marcados": n_leads,
+                     "leads_limpos": len(limpos)}
+        log.info(f"sync_parcelas_atrasadas_rapido: {resultado}")
+        return resultado
+
+    def promover_leads_ativos(self) -> int:
+        """
+        Promove a status=cliente, NA HORA, o lead (visitante/lead/inativo) que
+        acabou de comprar plano — sem esperar o sync_alunos_ativos da
+        madrugada. Sinais: linhas 'Ativo' do mês em visitantes_bv e vendas dos
+        últimos 7 dias em vendas_pacto. Nunca rebaixa ninguém nem toca em
+        'inadimplente'; o diário confirma e enriquece o metadata depois.
+        """
+        mes = date.today().strftime("%Y-%m")
+        lids: set[str] = set()
+        r = (self.sb.table("visitantes_bv").select("lead_id")
+             .eq("situacao", "Ativo").eq("mes_referencia", mes)
+             .not_.is_("lead_id", "null").execute())
+        lids |= {x["lead_id"] for x in (r.data or [])}
+        desde = (date.today() - timedelta(days=7)).isoformat()
+        r = (self.sb.table("vendas_pacto").select("codigo_cliente")
+             .gte("data_venda", desde).not_.is_("codigo_cliente", "null").execute())
+        lids |= {_pacto_lead_id(int(v["codigo_cliente"]), self.tenant_id)
+                 for v in (r.data or [])}
+        if not lids:
+            return 0
+        alvo = list(lids)
+        ups = []
+        for i in range(0, len(alvo), 80):
+            rr = (self.sb.table("leads").select("id,name,status")
+                  .in_("id", alvo[i:i + 80]).execute())
+            for row in (rr.data or []):
+                if row.get("status") in ("lead", "visitante", "inativo"):
+                    ups.append({"id": row["id"], "name": row.get("name"),
+                                "status": "cliente", "tenant_id": self.tenant_id})
+        n = self._upsert_batch(ups)
+        if n:
+            log.info(f"promover_leads_ativos: {n} lead(s) promovido(s) a cliente")
+        return n
+
     def refresh_instagram_token(self) -> dict:
         """Renova o token da rota 'API com login do Instagram' (config
         INSTAGRAM_LOGIN_TOKEN). Tokens long-lived valem 60 dias; a Meta exige
@@ -3616,6 +3824,48 @@ class CRMClient:
                 resultado[nome] = f"erro: {e}"
         return resultado
 
+    def sincronizar_frequente(self, pacto: "PactoClient", adm: "PactoADMClient") -> dict:
+        """
+        Sync FREQUENTE (nuvem, a cada ~10 min) — só fontes RÁPIDAS, pra deixar
+        vendas, faturamento, produtos/diárias, visitas, conversões e
+        inadimplência quase em tempo real no CRM. Inclui os passos do antigo
+        sync horário (que ele substitui). O diário continua dono do trabalho
+        pesado (alunos, metadata, scans longos, meses anteriores).
+        """
+        resultado = {}
+        for nome, fn in [
+            # passos do antigo sync horário
+            ("visitantes_hoje",   lambda: self.sync_visitantes(adm)),
+            ("meta_lead_ads",     lambda: self.sync_meta_lead_ads()),
+            # contratos novos entram na hora (walker barato: ~10 requests)
+            ("vendas_pacto",      lambda: self.sync_vendas_pacto(adm)),
+            # enriquece SÓ as vendas recém-chegadas (vínculo/caixa/recorrente);
+            # o mês inteiro continua sendo re-enriquecido no diário
+            ("vendas_detalhe_novas", lambda: self.sync_vendas_detalhe_mes(
+                adm, apenas_sem_detalhe=True)),
+            # visitas novas + conversões da janela curta (DEPOIS de vendas:
+            # o passo 6 do BV cruza vendas_pacto fresquinho)
+            ("visitantes_bv",     lambda: self.sync_visitantes_bv(adm, dias=2)),
+            # visitante que comprou vira aluno ativo na hora (kanban Alunos)
+            ("promover_ativos",   lambda: self.promover_leads_ativos()),
+            # páginas Agendamentos/Leads/Renovação enxergam o novo cliente
+            ("agendamentos_status", lambda: self.sync_agendamentos_status()),
+            ("leads_acomp_status", lambda: self.sync_leads_acompanhamento_status()),
+            ("renovacoes_status", lambda: self.sync_renovacoes_status()),
+            # inadimplência intraday: relatório rápido (1-2 requests)
+            ("parcelas_rapido",   lambda: self.sync_parcelas_atrasadas_rapido(pacto)),
+            # KPIs oficiais do mês corrente (faturamento/caixa/produtos)
+            ("comissao_consultora", lambda: self.sync_comissao_consultora(pacto)),
+            ("faturamento_produtos", lambda: self.sync_faturamento_produtos(pacto)),
+            ("parcelas_mes_kpi",  lambda: self.sync_parcelas_mes_kpi(pacto)),
+        ]:
+            try:
+                resultado[nome] = fn()
+            except Exception as e:
+                log.error(f"{nome}: {e}")
+                resultado[nome] = f"erro: {e}"
+        return resultado
+
     def sincronizar_tudo(self, pacto: "PactoClient", adm: "PactoADMClient") -> dict:
         """Executa todos os syncs (leads + diário) e retorna resumo consolidado."""
         log.info("=== Sincronização completa Pacto → CRM ===")
@@ -3667,6 +3917,10 @@ if __name__ == "__main__":
     #   python agente_integrador_pacto.py --sync-horario            (sincronizar_leads)
     if "--sync-horario" in sys.argv:
         r = CRMClient().sincronizar_leads(pacto, adm)
+        print(json.dumps(r, ensure_ascii=False, indent=2, default=str))
+        raise SystemExit(1 if any(isinstance(v, str) and v.startswith("erro") for v in r.values()) else 0)
+    if "--sync-frequente" in sys.argv:
+        r = CRMClient().sincronizar_frequente(pacto, adm)
         print(json.dumps(r, ensure_ascii=False, indent=2, default=str))
         raise SystemExit(1 if any(isinstance(v, str) and v.startswith("erro") for v in r.values()) else 0)
     if "--scan-parcelas-completo" in sys.argv:
@@ -3748,6 +4002,12 @@ if __name__ == "__main__":
  52 - Sync: flag recorrente nas parcelas atrasadas
  53 - Sync: avaliacoes fisicas (BI) -> tabela avaliacoes_fisicas
  54 - Sync: vendas avulsas (produto/diaria) -> tabela vendas_avulsas
+ 55 - Sync: comissao p/ consultora (relatorio oficial) -> comissao_consultora
+ 56 - Sync: faturamento produtos/servicos/diarias -> faturamento_produtos
+ 57 - Sync: KPIs parcelas do mes (caixa/inadimplencia) -> vendas_mes_kpi
+ 58 - Sync: parcelas atrasadas RAPIDO (relatorio zw-boot, ~10s)
+ 59 - Promover leads que compraram plano -> status cliente
+ 60 - Sync FREQUENTE completo (o que roda a cada 10 min na nuvem)
   0 - Sair
 """
 
@@ -4038,5 +4298,14 @@ if __name__ == "__main__":
             mes = input("Mês (YYYY-MM, vazio = atual): ").strip() or None
             r = _crm().sync_parcelas_mes_kpi(pacto, mes=mes)
             print(f"\nParcelas do mês (caixa/inad): {r}")
+        elif op == "58":
+            r = _crm().sync_parcelas_atrasadas_rapido(pacto)
+            print(f"\nParcelas atrasadas (rápido): {r}")
+        elif op == "59":
+            n = _crm().promover_leads_ativos()
+            print(f"\nLeads promovidos a cliente: {n}")
+        elif op == "60":
+            r = _crm().sincronizar_frequente(pacto, adm)
+            print(f"\nSync frequente: {json.dumps(r, ensure_ascii=False, indent=2, default=str)}")
         else:
             print("Opcao invalida.")
