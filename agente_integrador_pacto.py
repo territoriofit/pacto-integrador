@@ -1778,7 +1778,8 @@ class CRMClient:
         CANON = {"kelytta": "Kellyta", "kellyta": "Kellyta",
                  "nathalia": "Nathalia", "nathy": "Nathalia",
                  "raiane": "Raiane", "rai": "Raiane",
-                 "ly": "Lyandra", "lyandra": "Lyandra"}
+                 "ly": "Lyandra", "lyandra": "Lyandra",
+                 "andre": "André", "andré": "André"}
         n = falhas = 0
         for ld in alvo.values():
             meta = ld.get("metadata") or {}
@@ -2833,7 +2834,8 @@ class CRMClient:
     _CONSULTORA_CANON = {"kelytta": "Kellyta", "kellyta": "Kellyta",
                          "nathalia": "Nathalia", "nathy": "Nathalia",
                          "raiane": "Raiane", "rai": "Raiane",
-                         "ly": "Lyandra", "lyandra": "Lyandra"}
+                         "ly": "Lyandra", "lyandra": "Lyandra",
+                 "andre": "André", "andré": "André"}
 
     def sync_vendas_pacto(self, adm: "PactoADMClient", backfill_desde: str | None = None,
                           max_misses: int = 8) -> dict:
