@@ -3339,6 +3339,75 @@ class CRMClient:
                  f"R$ {total:.2f}")
         return {"consultoras": len(novas), "total": round(total, 2)}
 
+    _FAT_NAO_PRODUTO = {"mês de referência plano", "mes de referencia plano",
+                        "matrícula, rematrícula, renovação",
+                        "matricula, rematricula, renovacao",
+                        "cheques devolvidos"}
+    # cada checkbox de "Tipos de Produtos" da tela é um boolean no filters
+    # (nomes descobertos 1 a 1 em 2026-07-08: campo errado dá 500)
+    _FAT_TIPOS_PRODUTO = [
+        "manutencaoModalidade", "trancamento", "aulaAvulsa",
+        "produtoSessao", "acertoCCAluno", "quitacaoCancelamento",
+        "alterarHorario", "bioTotem", "taxaRenegociacao", "produtoEstoque",
+        "desafio", "servico", "creditoPersonal", "diaria", "taxaPersonal",
+        "pgtoSaldoDevedor", "armario", "consultaNutricional", "locacao",
+        "taxaAdesao", "atestado",
+    ]
+
+    def _operadoras_faturamento(self, pacto: "PactoClient") -> dict[str, int]:
+        """códigos de OPERADOR (≠ código de colaborador!) via o mesmo lookup da
+        tela; match pelo 1º nome canônico (jun/2026: André=3, Nathalia=95,
+        Lyandra=123, Raiane=187, Kelytta=198)"""
+        base = pacto.base.split("/TreinoWeb")[0] + "/zw-boot"
+        rc = requests.get(
+            f"{base}/faturamento-sintetico/consultar-operador",
+            params={"empresaId": 1, "searchValue": ""},
+            headers={"Authorization": f"Bearer {pacto.jwt_token}",
+                     "empresaId": "1"}, timeout=60).json()
+        consultoras: dict[str, int] = {}
+        for c in rc.get("content") or []:
+            canon = self._CANON_CONSULTORA.get(
+                (c.get("nome") or "").split()[0].lower())
+            cod = c.get("codigo")
+            if canon and cod and canon not in consultoras:
+                consultoras[canon] = int(cod)
+        return consultoras
+
+    def _coleta_faturamento(self, pacto: "PactoClient", data_ini: str,
+                            data_fim: str,
+                            operador_codigo: int | None = None) -> list[dict]:
+        """Faturamento por Período no intervalo → [{tipo_produto, qtd, valor}]
+        (só produtos/serviços; planos e cheques ficam de fora)."""
+        filters = {"empresaId": 1, "dataInicio": data_ini,
+                   "dataTermino": data_fim, "agrupamento": "nomeDuracao"}
+        for t in self._FAT_TIPOS_PRODUTO:
+            filters[t] = True
+        if operador_codigo:
+            filters["operadorCodigo"] = operador_codigo
+        r = self._zwboot(pacto, "/faturamento-sintetico/gerar", filters)
+        r.raise_for_status()
+        content = (r.json() or {}).get("content") or {}
+        out = []
+        for tp in content.get("listaTipoProduto") or []:
+            nome_tipo = (tp.get("tipoProduto") or "").strip()
+            if not tp.get("apresentarResultado"):
+                continue
+            if nome_tipo.lower() in self._FAT_NAO_PRODUTO:
+                continue
+            qtd = valor = 0
+            for p in tp.get("listaProduto") or []:
+                # cada tipo tem uma linha 'TOTALIZADOR' que repete a soma
+                # dos produtos — somar junto DOBRA o valor
+                if (p.get("descricao") or "").strip().upper() == "TOTALIZADOR":
+                    continue
+                for x in p.get("listaProdutoXMes") or []:
+                    qtd += x.get("qtd") or 0
+                    valor += x.get("valor") or 0.0
+            if qtd or valor:
+                out.append({"tipo_produto": nome_tipo, "qtd": qtd,
+                            "valor": round(valor, 2)})
+        return out
+
     def sync_faturamento_produtos(self, pacto: "PactoClient",
                                   mes: str | None = None) -> dict:
         """
@@ -3353,79 +3422,18 @@ class CRMClient:
         """
         mes, data_ini, data_fim = self._mes_range_iso(mes)
         log.info(f"CRM sync: faturamento produtos/serviços {mes}...")
-        NAO_PRODUTO = {"mês de referência plano", "mes de referencia plano",
-                       "matrícula, rematrícula, renovação",
-                       "matricula, rematricula, renovacao",
-                       "cheques devolvidos"}
-        # cada checkbox de "Tipos de Produtos" da tela é um boolean no filters
-        # (nomes descobertos 1 a 1 em 2026-07-08: campo errado dá 500)
-        TIPOS_PRODUTO = [
-            "manutencaoModalidade", "trancamento", "aulaAvulsa",
-            "produtoSessao", "acertoCCAluno", "quitacaoCancelamento",
-            "alterarHorario", "bioTotem", "taxaRenegociacao", "produtoEstoque",
-            "desafio", "servico", "creditoPersonal", "diaria", "taxaPersonal",
-            "pgtoSaldoDevedor", "armario", "consultaNutricional", "locacao",
-            "taxaAdesao", "atestado",
-        ]
-
-        # códigos de OPERADOR (≠ código de colaborador!) via o mesmo lookup da
-        # tela; match pelo 1º nome canônico (jun/2026: André=3, Nathalia=95,
-        # Lyandra=123, Raiane=187, Kelytta=198)
-        base = pacto.base.split("/TreinoWeb")[0] + "/zw-boot"
-        rc = requests.get(
-            f"{base}/faturamento-sintetico/consultar-operador",
-            params={"empresaId": 1, "searchValue": ""},
-            headers={"Authorization": f"Bearer {pacto.jwt_token}",
-                     "empresaId": "1"}, timeout=60).json()
-        consultoras: dict[str, int] = {}
-        for c in rc.get("content") or []:
-            canon = self._CANON_CONSULTORA.get(
-                (c.get("nome") or "").split()[0].lower())
-            cod = c.get("codigo")
-            if canon and cod and canon not in consultoras:
-                consultoras[canon] = int(cod)
-
-        def _coleta(operador_codigo: int | None, consultora: str | None) -> list[dict]:
-            filters = {"empresaId": 1, "dataInicio": data_ini,
-                       "dataTermino": data_fim, "agrupamento": "nomeDuracao"}
-            for t in TIPOS_PRODUTO:
-                filters[t] = True
-            if operador_codigo:
-                filters["operadorCodigo"] = operador_codigo
-            r = self._zwboot(pacto, "/faturamento-sintetico/gerar", filters)
-            r.raise_for_status()
-            content = (r.json() or {}).get("content") or {}
-            out = []
-            for tp in content.get("listaTipoProduto") or []:
-                nome_tipo = (tp.get("tipoProduto") or "").strip()
-                if not tp.get("apresentarResultado"):
-                    continue
-                if nome_tipo.lower() in NAO_PRODUTO:
-                    continue
-                qtd = valor = 0
-                for p in tp.get("listaProduto") or []:
-                    # cada tipo tem uma linha 'TOTALIZADOR' que repete a soma
-                    # dos produtos — somar junto DOBRA o valor
-                    if (p.get("descricao") or "").strip().upper() == "TOTALIZADOR":
-                        continue
-                    for x in p.get("listaProdutoXMes") or []:
-                        qtd += x.get("qtd") or 0
-                        valor += x.get("valor") or 0.0
-                if qtd or valor:
-                    out.append({
-                        "tenant_id": self.tenant_id, "mes_referencia": mes,
-                        "consultora": consultora, "tipo_produto": nome_tipo,
-                        "qtd": qtd, "valor": round(valor, 2),
-                        "synced_at": datetime.now(dt_timezone.utc).isoformat(),
-                    })
-            return out
-
-        rows = _coleta(None, None)
-        for consultora, cid in consultoras.items():
+        consultoras = self._operadoras_faturamento(pacto)
+        agora_iso = datetime.now(dt_timezone.utc).isoformat()
+        rows: list[dict] = []
+        for consultora, cid in [(None, None)] + sorted(consultoras.items()):
             try:
-                rows += _coleta(cid, consultora)
+                base_rows = self._coleta_faturamento(pacto, data_ini, data_fim, cid)
             except Exception as e:
                 log.warning(f"faturamento produtos {consultora}: {e}")
+                continue
+            rows += [{"tenant_id": self.tenant_id, "mes_referencia": mes,
+                      "consultora": consultora, **br, "synced_at": agora_iso}
+                     for br in base_rows]
         self.sb.table("faturamento_produtos").delete().eq(
             "mes_referencia", mes).execute()
         if rows:
@@ -3434,6 +3442,67 @@ class CRMClient:
         log.info(f"sync_faturamento_produtos: {mes} — {len(rows)} linhas, "
                  f"geral R$ {total_geral:.2f}")
         return {"linhas": len(rows), "total_geral": round(total_geral, 2)}
+
+    @staticmethod
+    def _semanas_seg_dom(mes: str) -> list[tuple[int, int, int]]:
+        """[(semana, dia_ini, dia_fim)] em blocos SEG-DOM — mesma convenção do
+        Ranking (semana 1 = dia 1 até o 1º domingo; meses têm 5 ou 6)."""
+        ano, m = int(mes[:4]), int(mes[5:7])
+        prox = date(ano + (1 if m == 12 else 0), 1 if m == 12 else m + 1, 1)
+        ultimo = (prox - timedelta(days=1)).day
+        fim = 7 - date(ano, m, 1).weekday()  # seg=0..dom=6
+        out, s, ini = [], 1, 1
+        while ini <= ultimo:
+            out.append((s, ini, min(fim, ultimo)))
+            s, ini, fim = s + 1, fim + 1, fim + 7
+        return out
+
+    def sync_faturamento_produtos_semana(self, pacto: "PactoClient",
+                                         mes: str | None = None,
+                                         apenas_semana_atual: bool = False) -> dict:
+        """
+        Quebra SEMANAL (seg-dom) do Faturamento por Período → tabela
+        faturamento_produtos_semana — linhas Produtos/Serviços dos blocos de
+        semana do Ranking de Vendas. apenas_semana_atual=True sincroniza só a
+        semana de hoje (6 requests — barato pro sync frequente); o diário
+        refaz o mês inteiro (~30 requests).
+        """
+        agora = datetime.now()
+        mes = mes or agora.strftime("%Y-%m")
+        semanas = self._semanas_seg_dom(mes)
+        if apenas_semana_atual:
+            if mes != agora.strftime("%Y-%m"):
+                return {"linhas": 0, "semanas": []}
+            semanas = [w for w in semanas if w[1] <= agora.day <= w[2]]
+        log.info(f"CRM sync: faturamento produtos por semana {mes} "
+                 f"(semanas {[s for s, _, _ in semanas]})...")
+        consultoras = self._operadoras_faturamento(pacto)
+        agora_iso = datetime.now(dt_timezone.utc).isoformat()
+        rows: list[dict] = []
+        for s, d_ini, d_fim in semanas:
+            ini = f"{mes}-{d_ini:02d}T03:00:00.000Z"
+            fim = f"{mes}-{d_fim:02d}T03:00:00.000Z"
+            for consultora, cid in [(None, None)] + sorted(consultoras.items()):
+                try:
+                    base_rows = self._coleta_faturamento(pacto, ini, fim, cid)
+                except Exception as e:
+                    log.warning(f"faturamento semana {s} {consultora}: {e}")
+                    continue
+                rows += [{"tenant_id": self.tenant_id, "mes_referencia": mes,
+                          "semana": s, "consultora": consultora, **br,
+                          "synced_at": agora_iso} for br in base_rows]
+        q = self.sb.table("faturamento_produtos_semana").delete().eq(
+            "mes_referencia", mes)
+        if apenas_semana_atual:
+            if not semanas:
+                return {"linhas": 0, "semanas": []}
+            q = q.in_("semana", [s for s, _, _ in semanas])
+        q.execute()
+        if rows:
+            self.sb.table("faturamento_produtos_semana").insert(rows).execute()
+        log.info(f"sync_faturamento_produtos_semana: {mes} — "
+                 f"{len(rows)} linhas em {len(semanas)} semana(s)")
+        return {"linhas": len(rows), "semanas": [s for s, _, _ in semanas]}
 
     def sync_parcelas_mes_kpi(self, pacto: "PactoClient",
                               mes: str | None = None) -> dict:
@@ -3836,11 +3905,14 @@ class CRMClient:
             # comissão por consultora (carteira) + produtos/serviços
             ("comissao_consultora", lambda: self.sync_comissao_consultora(pacto)),
             ("faturamento_produtos", lambda: self.sync_faturamento_produtos(pacto)),
+            # quebra semanal (linhas Produtos/Serviços das semanas do Ranking)
+            ("faturamento_produtos_sem", lambda: self.sync_faturamento_produtos_semana(pacto)),
             ("parcelas_mes_kpi",   lambda: self.sync_parcelas_mes_kpi(pacto)),
             # mês ANTERIOR também (varredura 13/07/26: TODAS as tabelas mensais
             # estavam com junho congelado no snapshot de 07-09/07):
             ("comissao_consultora_ant", lambda: self.sync_comissao_consultora(pacto, mes=mes_ant)),
             ("faturamento_produtos_ant", lambda: self.sync_faturamento_produtos(pacto, mes=mes_ant)),
+            ("faturamento_produtos_sem_ant", lambda: self.sync_faturamento_produtos_semana(pacto, mes=mes_ant)),
             ("parcelas_mes_kpi_ant", lambda: self.sync_parcelas_mes_kpi(pacto, mes=mes_ant)),
             ("avaliacoes_fisicas_ant", lambda: self.sync_avaliacoes_fisicas(pacto, mes=mes_ant)),
             ("inadimplentes",      lambda: self.sync_inadimplentes(pacto, adm)),
@@ -3902,6 +3974,9 @@ class CRMClient:
             # KPIs oficiais do mês corrente (faturamento/caixa/produtos)
             ("comissao_consultora", lambda: self.sync_comissao_consultora(pacto)),
             ("faturamento_produtos", lambda: self.sync_faturamento_produtos(pacto)),
+            # só a semana corrente (6 requests) — o diário refaz o mês inteiro
+            ("faturamento_produtos_sem", lambda: self.sync_faturamento_produtos_semana(
+                pacto, apenas_semana_atual=True)),
             ("parcelas_mes_kpi",  lambda: self.sync_parcelas_mes_kpi(pacto)),
         ]:
             try:
@@ -4339,6 +4414,8 @@ if __name__ == "__main__":
             mes = input("Mês (YYYY-MM, vazio = atual): ").strip() or None
             r = _crm().sync_faturamento_produtos(pacto, mes=mes)
             print(f"\nFaturamento produtos: {r}")
+            r = _crm().sync_faturamento_produtos_semana(pacto, mes=mes)
+            print(f"Faturamento produtos por semana: {r}")
         elif op == "57":
             mes = input("Mês (YYYY-MM, vazio = atual): ").strip() or None
             r = _crm().sync_parcelas_mes_kpi(pacto, mes=mes)
