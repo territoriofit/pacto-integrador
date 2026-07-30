@@ -1,21 +1,20 @@
-# Campanha win-back — ex-alunos que nao renovaram em abril/2026
+# Campanha win-back — ex-alunos que nao renovaram em maio/2026
 #
-# Envia a arte da campanha (garrafa no ato + super desconto; quem responde
-# VOLTEI cai na consultora) pela instancia UazAPI "Whats TF 2000", em lotes
-# de ate 35/dia com 60-90s entre envios. Lista vem ao vivo do BI do Pacto
-# (quem ja voltou sai sozinho) e o dedup em agent_activity garante 1 envio
-# por pessoa — quando a lista esgotar, os runs passam a enviar 0.
+# Mesmo motor da campanha de abril (disparo_winback.py), com
+# CAMPANHA_MES=2026-05 e inicio as 08:00 BRT (pedido do Andre 30/07:
+# "amanha 31/07 faz a de maio as 8:00"). O cron dispara 07:40 BRT e o
+# script aguarda a janela; roda seg-sab ate a lista esgotar.
 #
-# ~81 alvos no lancamento (2026-07-30) => ~3 dias de disparo.
-# Horario: 10:10 BRT seg-sab (domingo nao envia).
+# Anti-bloqueio: 90-150s entre mensagens e teto de 35/dia POR campanha
+# (abril roda 10:10 no mesmo numero — espacamento protege a instancia).
 #
 # Secrets: SUPABASE_KEY, UAZAPI_TOKEN_2000, PACTO_TOKEN, PACTO_CHAVE
 
-name: Disparo win-back abril (WhatsApp)
+name: Disparo win-back maio (WhatsApp)
 
 on:
   schedule:
-    - cron: "10 13 * * 1-6"
+    - cron: "40 10 * * 1-6"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -32,13 +31,13 @@ on:
         default: ""
 
 concurrency:
-  group: disparo-winback
+  group: disparo-winback-maio
   cancel-in-progress: false
 
 jobs:
   disparo:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
 
@@ -49,13 +48,14 @@ jobs:
       - name: Instalar dependencias
         run: pip install requests
 
-      - name: Disparar campanha win-back
+      - name: Disparar campanha win-back maio
         env:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           UAZAPI_TOKEN_2000: ${{ secrets.UAZAPI_TOKEN_2000 }}
           PACTO_TOKEN: ${{ secrets.PACTO_TOKEN }}
           PACTO_CHAVE: ${{ secrets.PACTO_CHAVE }}
-          CAMPANHA_MES: "2026-04"
+          CAMPANHA_MES: "2026-05"
+          HORA_INICIO: "8"
           DRY_RUN: ${{ github.event.inputs.dry_run }}
           MAX_POR_RUN: ${{ github.event.inputs.max_por_run || '35' }}
           TEST_TO: ${{ github.event.inputs.test_to }}

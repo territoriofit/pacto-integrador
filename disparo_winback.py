@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Campanha win-back: ex-alunos que NAO renovaram o plano em abril/2026.
+Campanha win-back: ex-alunos que NAO renovaram o plano no mes de referencia
+(env CAMPANHA_MES, formato YYYY-MM; padrao 2026-04 = campanha de abril).
 
 Fluxo diario (GitHub Actions, ate esgotar a lista):
   1. Busca no BI do Pacto (/v2-indice-renovacao, reloadFull) os contratos com
@@ -21,10 +22,12 @@ fallback da Clara (so contato NOVO) nao intercepta.
 Janela de envio: 09:00-19:30 BRT.
 
 Env: SUPABASE_KEY, UAZAPI_TOKEN_2000, PACTO_TOKEN, PACTO_CHAVE.
-Opcional: DRY_RUN=1 (so lista) | TEST_TO=5516... (envia 1 exemplo pro numero,
-sem gravar dedup) | MAX_POR_RUN=n (padrao 35).
+Opcional: CAMPANHA_MES=YYYY-MM (padrao 2026-04) | HORA_INICIO=h (inicio da
+janela BRT, padrao 9) | DRY_RUN=1 (so lista) | TEST_TO=5516... (envia 1
+exemplo pro numero, sem gravar dedup) | MAX_POR_RUN=n (padrao 35).
 """
 
+import calendar
 import os
 import random
 import sys
@@ -39,9 +42,26 @@ PACTO_GW = "https://apigw.pactosolucoes.com.br"
 
 TZ_SP = timezone(timedelta(hours=-3))
 
-# abril/2026 em epoch ms UTC (mesmo filtro validado na sessao 2026-07-30)
-ABRIL_INI = 1775001600000   # 2026-04-01 00:00:00 UTC
-ABRIL_FIM = 1777507199000   # 2026-04-30 23:59:59 UTC
+MESES_PT = {1: "janeiro", 2: "fevereiro", 3: "marco", 4: "abril",
+            5: "maio", 6: "junho", 7: "julho", 8: "agosto",
+            9: "setembro", 10: "outubro", 11: "novembro", 12: "dezembro"}
+
+
+def _campanha():
+    """Mes de referencia via env CAMPANHA_MES (YYYY-MM, padrao 2026-04).
+
+    Retorna (tag, label, ini_ms, fim_ms). tag "abril26" mantem compat com
+    os dedup keys ja gravados da 1a campanha.
+    """
+    ref = os.environ.get("CAMPANHA_MES", "2026-04").strip()
+    ano, mes = int(ref[:4]), int(ref[5:7])
+    nome = MESES_PT[mes]
+    tag = f"{nome}{ano % 100}"
+    ultimo_dia = calendar.monthrange(ano, mes)[1]
+    ini = int(datetime(ano, mes, 1, tzinfo=timezone.utc).timestamp() * 1000)
+    fim = int(datetime(ano, mes, ultimo_dia, 23, 59, 59,
+                       tzinfo=timezone.utc).timestamp() * 1000)
+    return tag, f"{nome}/{ano}", ini, fim
 
 ARTE_URL = ("https://raw.githubusercontent.com/territoriofit/"
             "pacto-integrador/main/assets/winback_exalunos_abril.png")
@@ -83,23 +103,24 @@ def _fone_55(phone: str) -> str | None:
     return None
 
 
-def aguardar_janela_comercial() -> bool:
+def aguardar_janela_comercial(hora_inicio: int) -> bool:
     agora = datetime.now(TZ_SP)
     if agora.hour >= 20 or (agora.hour == 19 and agora.minute > 30):
         print(f"[janela] {agora:%H:%M} BRT — tarde demais, abortando.")
         return False
-    while agora.hour < 9:
-        espera = min(1800, (9 - agora.hour) * 3600 - agora.minute * 60)
+    while agora.hour < hora_inicio:
+        espera = min(1800,
+                     (hora_inicio - agora.hour) * 3600 - agora.minute * 60)
         print(f"[janela] {agora:%H:%M} BRT — aguardando {espera//60} min...")
         time.sleep(espera)
         agora = datetime.now(TZ_SP)
     return True
 
 
-def buscar_nao_renovados() -> list[dict]:
-    """Contratos de abril/2026 nao renovados cujo cliente segue inativo."""
+def buscar_nao_renovados(label: str, ini_ms: int, fim_ms: int) -> list[dict]:
+    """Contratos do mes nao renovados cujo cliente segue inativo."""
     import json as _json
-    body = {"empresa": 1, "dataInicial": ABRIL_INI, "dataFinal": ABRIL_FIM,
+    body = {"empresa": 1, "dataInicial": ini_ms, "dataFinal": fim_ms,
             "retornarContratos": True,
             "desconsiderarContratosRenovaveis": False,
             "considerarMudancaDePlano": False}
@@ -112,7 +133,7 @@ def buscar_nao_renovados() -> list[dict]:
     data = _json.loads(jd) if isinstance(jd, str) else jd
     lista = data.get("contratosNaoRenovadosToleranciaPrevisaoMes", [])
     inativos = [c for c in lista if c.get("situacaoCliente") == "IN"]
-    print(f"[pacto] abril/26: {len(lista)} nao renovados, "
+    print(f"[pacto] {label}: {len(lista)} nao renovados, "
           f"{len(inativos)} ainda inativos")
     return inativos
 
@@ -140,6 +161,7 @@ def main() -> int:
     dry = os.environ.get("DRY_RUN", "") == "1"
     test_to = os.environ.get("TEST_TO", "").strip()
     max_por_run = int(os.environ.get("MAX_POR_RUN", "35"))
+    hora_inicio = int(os.environ.get("HORA_INICIO", "9"))
     if not key or (not zap and not dry):
         print("Faltam envs SUPABASE_KEY / UAZAPI_TOKEN_2000")
         return 1
@@ -147,11 +169,14 @@ def main() -> int:
         print("Faltam envs PACTO_TOKEN / PACTO_CHAVE")
         return 1
 
-    if not dry and not aguardar_janela_comercial():
+    tag, label, ini_ms, fim_ms = _campanha()
+    print(f"[campanha] winback-{tag} ({label})")
+
+    if not dry and not aguardar_janela_comercial(hora_inicio):
         return 0
 
     sb = _sb_headers(key)
-    alvos = buscar_nao_renovados()
+    alvos = buscar_nao_renovados(label, ini_ms, fim_ms)
     enviados, pulados, sem_fone = 0, 0, []
 
     for c in alvos:
@@ -162,7 +187,7 @@ def main() -> int:
 
         cod = c["codigoCliente"]
         nome = c.get("nomeCliente") or ""
-        disparo_key = f"winback-abril26-{cod}"
+        disparo_key = f"winback-{tag}-{cod}"
 
         rj = requests.get(
             f"{SUPABASE_URL}/rest/v1/agent_activity",
@@ -206,17 +231,19 @@ def main() -> int:
             f"{SUPABASE_URL}/rest/v1/agent_activity",
             headers={**sb, "Prefer": "return=minimal"},
             json={"agent_slug": "crm-relacionamento",
-                  "title": "Win-back abril enviado no WhatsApp",
+                  "title": f"Win-back {label} enviado no WhatsApp",
                   "detail": f"{nome.title()} — campanha ex-alunos nao "
-                            "renovados de abril (garrafa + super desconto) "
-                            "pelo Whats 2000",
+                            f"renovados de {label} (garrafa + super "
+                            "desconto) pelo Whats 2000",
                   "status": "concluido",
                   "metadata": {"disparo_key": disparo_key,
                                "codigo_cliente": cod,
-                               "campanha": "winback-abril26"}},
+                               "campanha": f"winback-{tag}"}},
             timeout=30)
 
-        time.sleep(60 + random.uniform(0, 30))
+        # anti-bloqueio: 90-150s entre mensagens (2 campanhas no mesmo
+        # numero a partir de 31/07 — espacamento maior protege a instancia)
+        time.sleep(90 + random.uniform(0, 60))
 
     print(f"\nResumo: {enviados} enviado(s), {pulados} ja enviados antes, "
           f"{len(sem_fone)} sem telefone")
@@ -228,7 +255,7 @@ def main() -> int:
             f"{SUPABASE_URL}/rest/v1/agent_activity",
             headers={**sb, "Prefer": "return=minimal"},
             json={"agent_slug": "crm-relacionamento",
-                  "title": "Campanha win-back abril (run diario)",
+                  "title": f"Campanha win-back {label} (run diario)",
                   "detail": f"{enviados} arte(s) enviada(s) no WhatsApp, "
                             f"{pulados} ja tinham recebido, "
                             f"{len(sem_fone)} sem telefone.",
