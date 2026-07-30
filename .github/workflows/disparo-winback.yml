@@ -1,0 +1,56 @@
+# Campanha win-back — ex-alunos que nao renovaram em abril/2026
+#
+# Envia a arte da campanha (garrafa no ato + super desconto; quem responde
+# VOLTEI cai na consultora) pela instancia UazAPI "Whats TF 2000", em lotes
+# de ate 35/dia com 60-90s entre envios. Lista vem ao vivo do BI do Pacto
+# (quem ja voltou sai sozinho) e o dedup em agent_activity garante 1 envio
+# por pessoa — quando a lista esgotar, os runs passam a enviar 0.
+#
+# ~81 alvos no lancamento (2026-07-30) => ~3 dias de disparo.
+# Horario: 10:10 BRT seg-sab (domingo nao envia).
+#
+# Secrets: SUPABASE_KEY, UAZAPI_TOKEN_2000, PACTO_TOKEN, PACTO_CHAVE
+
+name: Disparo win-back abril (WhatsApp)
+
+on:
+  schedule:
+    - cron: "10 13 * * 1-6"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "1 = so listar, sem enviar"
+        required: false
+        default: ""
+      max_por_run:
+        description: "limite de envios neste run (padrao 35)"
+        required: false
+        default: ""
+
+concurrency:
+  group: disparo-winback
+  cancel-in-progress: false
+
+jobs:
+  disparo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: pip install requests
+
+      - name: Disparar campanha win-back
+        env:
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          UAZAPI_TOKEN_2000: ${{ secrets.UAZAPI_TOKEN_2000 }}
+          PACTO_TOKEN: ${{ secrets.PACTO_TOKEN }}
+          PACTO_CHAVE: ${{ secrets.PACTO_CHAVE }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          MAX_POR_RUN: ${{ github.event.inputs.max_por_run || '35' }}
+        run: python disparo_winback.py
