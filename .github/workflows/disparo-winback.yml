@@ -26,6 +26,10 @@ on:
         description: "limite de envios neste run (padrao 35)"
         required: false
         default: ""
+      test_to:
+        description: "5516... = envia 1 exemplo so pra esse numero"
+        required: false
+        default: ""
 
 concurrency:
   group: disparo-winback
@@ -53,4 +57,5 @@ jobs:
           PACTO_CHAVE: ${{ secrets.PACTO_CHAVE }}
           DRY_RUN: ${{ github.event.inputs.dry_run }}
           MAX_POR_RUN: ${{ github.event.inputs.max_por_run || '35' }}
+          TEST_TO: ${{ github.event.inputs.test_to }}
         run: python disparo_winback.py
