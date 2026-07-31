@@ -3510,23 +3510,28 @@ class CRMClient:
         KPIs "Caixa em aberto (vendas do mês)" e "Inadimplência recorrentes"
         da página Vendas do Mês. Fonte: Relatório Parcelas (zw-boot
         /parcela-em-aberto/consultar), situação EA, faturamento dentro do mês,
-        vencimento do dia 01 do mês até o dia 10 do MÊS SEGUINTE; recorrência
-        SIM (enum 2) = inadimplência recorrentes, NÃO (enum 3) = caixa aberto.
+        recorrência SIM (enum 2) = inadimplência recorrentes, NÃO (enum 3)
+        = caixa aberto.
 
-        REGRA 2026-07-10 (pedido do usuário — caso Denis de Aquino): parcela
-        FUTURA não conta. Só entra parcela VENCIDA (dataVencimento < hoje);
-        na inadimplência recorrente o aluno ainda precisa ter plano recorrente
-        ATIVO (status cliente/inadimplente no CRM). Por isso o cálculo passou
-        dos totais prontos do relatório para as linhas, filtradas aqui.
+        REGRA 2026-07-31 (caixa em aberto): TODAS as parcelas EA dos planos
+        NÃO recorrentes faturados no mês — vencidas E futuras, janela de
+        vencimento de 2 anos (era só vencida até dia 10 do mês seguinte;
+        André pediu "tudo que foi faturado no mês e não recebido totalmente,
+        exceto recorrente").
+        REGRA 2026-07-10 (inadimplência recorrente, caso Denis de Aquino):
+        parcela FUTURA não conta — só VENCIDA (dataVencimento < hoje) e o
+        aluno precisa ter plano recorrente ATIVO (cliente/inadimplente no CRM).
         """
         mes, fat_ini, fat_fim = self._mes_range_iso(mes)
         ano, m = int(mes[:4]), int(mes[5:7])
         prox_ano, prox_m = (ano + 1, 1) if m == 12 else (ano, m + 1)
         venc_ini = fat_ini
         venc_fim = f"{prox_ano:04d}-{prox_m:02d}-10T03:00:00.000Z"
+        # caixa conta parcelas futuras também — janela larga de vencimento
+        venc_fim_caixa = f"{ano + 2:04d}-{m:02d}-01T03:00:00.000Z"
         hoje = date.today().isoformat()
         log.info(f"CRM sync: parcelas em aberto do mês {mes} "
-                 f"(somente vencidas < {hoje})...")
+                 f"(inad: vencidas < {hoje}; caixa: vencidas+futuras)...")
 
         # Matrículas com contrato ativo (cliente/inadimplente) — normalizadas
         # sem zeros à esquerda ("019988" do relatório vs 19988 do sync diário).
@@ -3563,14 +3568,21 @@ class CRMClient:
                 filters["dataInicioFaturamento"] = fat_ini
                 filters["dataTerminoFaturamento"] = fat_fim
             base = pacto.base.split("/TreinoWeb")[0] + "/zw-boot"
-            r = requests.get(f"{base}/parcela-em-aberto/consultar",
-                             params={"empresaId": 1, "filters": json.dumps(filters),
-                                     "configs": "{}", "page": 0, "size": 500},
-                             headers={"Authorization": f"Bearer {pacto.jwt_token}",
-                                      "empresaId": "1"}, timeout=90)
-            r.raise_for_status()
-            c = (r.json() or {}).get("content") or {}
-            return c.get("parcelas") or c.get("lista") or []
+            out: list[dict] = []
+            page = 0
+            while True:
+                r = requests.get(f"{base}/parcela-em-aberto/consultar",
+                                 params={"empresaId": 1, "filters": json.dumps(filters),
+                                         "configs": "{}", "page": page, "size": 500},
+                                 headers={"Authorization": f"Bearer {pacto.jwt_token}",
+                                          "empresaId": "1"}, timeout=90)
+                r.raise_for_status()
+                c = (r.json() or {}).get("content") or {}
+                lote = c.get("parcelas") or c.get("lista") or []
+                out += lote
+                if len(lote) < 500:
+                    return out
+                page += 1
 
         def _vencida(p: dict) -> bool:
             return str(p.get("dataVencimento") or "")[:10] < hoje
@@ -3581,7 +3593,9 @@ class CRMClient:
 
         inad_rows = [p for p in _consulta(2)
                      if _vencida(p) and _mat(p) in ativos]
-        caixa_rows = [p for p in _consulta(3) if _vencida(p)]
+        # caixa: TODAS as EA (vencidas e futuras) dos planos não recorrentes
+        # faturados no mês — regra 2026-07-31
+        caixa_rows = _consulta(3, venc_f=venc_fim_caixa)
 
         # Inadimplência recorrente DO MÊS (régua do André 13/07/26): parcelas EA
         # de recorrência com VENCIMENTO de 01 do mês até hoje (mês fechado: o
