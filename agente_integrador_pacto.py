@@ -3032,15 +3032,23 @@ class CRMClient:
                 log.warning(f"contrato {v['codigo_contrato']}: {e}")
                 falhas += 1
             try:
-                rp = adm._gw("GET", f"/parcelas/{v['codigo_pessoa']}",
-                             params={"size": 200})
-                parcelas = rp.get("content", []) if isinstance(rp, dict) else []
-                abertas = [p for p in parcelas
-                           if p.get("contrato") == v["codigo_contrato"]
-                           and p.get("situacao") != "PG"]
-                upd["caixa_aberto"] = round(sum(float(p.get("valor") or 0)
-                                                for p in abertas), 2)
-                upd["parcelas_abertas"] = len(abertas)
+                if upd.get("recorrente"):
+                    # Plano RECORRENTE: as parcelas em aberto são a régua FUTURA
+                    # do cartão (cobrança automática mês a mês) — não é caixa em
+                    # aberto (regra do André 2026-08-01). Vencida de recorrente
+                    # já aparece no KPI "Inadimplência recorrentes".
+                    upd["caixa_aberto"] = 0.0
+                    upd["parcelas_abertas"] = 0
+                else:
+                    rp = adm._gw("GET", f"/parcelas/{v['codigo_pessoa']}",
+                                 params={"size": 200})
+                    parcelas = rp.get("content", []) if isinstance(rp, dict) else []
+                    abertas = [p for p in parcelas
+                               if p.get("contrato") == v["codigo_contrato"]
+                               and p.get("situacao") != "PG"]
+                    upd["caixa_aberto"] = round(sum(float(p.get("valor") or 0)
+                                                    for p in abertas), 2)
+                    upd["parcelas_abertas"] = len(abertas)
             except Exception as e:
                 log.warning(f"parcelas venda {v['codigo_contrato']}: {e}")
                 falhas += 1
