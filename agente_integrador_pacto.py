@@ -3282,6 +3282,13 @@ class CRMClient:
         url = (r.json() or {}).get("content")
         if not url:
             raise RuntimeError(f"comissao-consultor sem url de excel: {r.text[:200]}")
+        if not str(url).lower().startswith("http"):
+            # ADM devolve content="sem_registros" quando o mês ainda não tem
+            # pagamentos (ex: virada de mês) — relatório vazio, não erro
+            self.sb.table("comissao_consultora").delete().eq(
+                "mes_referencia", mes).execute()
+            log.info(f"sync_comissao_consultora: {mes} — relatório vazio ({url})")
+            return {"consultoras": 0, "total": 0.0, "relatorio_vazio": True}
         xls = requests.get(url, timeout=180)
         xls.raise_for_status()
 
