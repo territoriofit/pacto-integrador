@@ -5,8 +5,7 @@
 # da 1a mensagem; morre sozinha quando a parcela e paga (sai da tabela
 # parcelas_atrasadas no sync diario). Whats 2000, 90-150s entre envios.
 #
-# O cron esta DESATIVADO ate o Andre aprovar os textos — validar com
-# workflow_dispatch (dry_run=1 e depois test_to) e ai descomentar.
+# Textos aprovados pelo Andre em 2026-08-03 (validados com test_to).
 # Roda TODO DIA (dias consecutivos fazem parte da cadencia da regua).
 #
 # Secrets: SUPABASE_KEY, UAZAPI_TOKEN_2000
@@ -14,8 +13,8 @@
 name: Disparo regua de cobranca (WhatsApp)
 
 on:
-  # schedule:
-  #   - cron: "20 14 * * *"   # 11:20 BRT todos os dias (apos as campanhas)
+  schedule:
+    - cron: "20 14 * * *"   # 11:20 BRT todos os dias (apos as campanhas)
   workflow_dispatch:
     inputs:
       dry_run:
