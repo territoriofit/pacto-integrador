@@ -1,0 +1,64 @@
+# Campanha aniversariantes inativos — 2 meses gratis na rematricula
+#
+# Envia a arte da campanha (quem responde PRESENTE cai na consultora) pela
+# instancia UazAPI "Whats TF 2000", ate 25/dia com 90-150s entre envios.
+# Publico: leads inativos com metadata.aniversariante_mes_atual=true (flag
+# mantida pelo sincronizar_diario) e ultimo acesso na catraca em ate 24
+# meses. Dedup em agent_activity = 1 envio por pessoa por mes.
+#
+# O cron esta DESATIVADO ate o Andre aprovar arte + copy — validar antes
+# com workflow_dispatch (dry_run=1 e depois test_to) e ai descomentar.
+#
+# Secrets: SUPABASE_KEY, UAZAPI_TOKEN_2000
+
+name: Disparo aniversariantes inativos (WhatsApp)
+
+on:
+  # schedule:
+  #   - cron: "40 13 * * 1-6"   # 10:40 BRT seg-sab (apos o win-back das 10:10)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "1 = so listar, sem enviar"
+        required: false
+        default: "1"
+      max_por_run:
+        description: "limite de envios neste run (padrao 25)"
+        required: false
+        default: ""
+      test_to:
+        description: "5516... = envia 1 exemplo so pra esse numero"
+        required: false
+        default: ""
+      meses_ultimo_acesso:
+        description: "janela de ultimo treino em meses (padrao 24)"
+        required: false
+        default: ""
+
+concurrency:
+  group: disparo-aniversariantes
+  cancel-in-progress: false
+
+jobs:
+  disparo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: pip install requests
+
+      - name: Disparar campanha aniversariantes
+        env:
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          UAZAPI_TOKEN_2000: ${{ secrets.UAZAPI_TOKEN_2000 }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          MAX_POR_RUN: ${{ github.event.inputs.max_por_run || '25' }}
+          TEST_TO: ${{ github.event.inputs.test_to }}
+          MESES_ULTIMO_ACESSO: ${{ github.event.inputs.meses_ultimo_acesso || '24' }}
+        run: python disparo_aniversariantes.py

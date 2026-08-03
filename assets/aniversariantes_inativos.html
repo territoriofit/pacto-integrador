@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>Aniversariantes Inativos — Território Fit</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { margin:0; padding:0; background:#0A0A0A; }
+  :root {
+    --orange:#FF6B1A;
+    --orange-deep:#D94A08;
+    --white:#FFFFFF;
+    --gray:#9A9A9A;
+    --bg:#0A0A0A;
+  }
+  .card {
+    width:1080px; height:1350px;
+    background:var(--bg);
+    position:relative; overflow:hidden;
+    font-family:'Montserrat','Segoe UI',Arial,sans-serif;
+    color:var(--white);
+    text-align:center;
+  }
+  /* textura sutil de fundo */
+  .card::before {
+    content:''; position:absolute; inset:0;
+    background:
+      radial-gradient(ellipse 900px 400px at 50% -100px, rgba(255,107,26,0.07), transparent 70%),
+      radial-gradient(ellipse 900px 380px at 50% 1420px, rgba(255,107,26,0.06), transparent 70%);
+    pointer-events:none;
+  }
+
+  /* ===== TOPO ===== */
+  .top {
+    height:424px;
+    display:flex; flex-direction:column; align-items:center; justify-content:flex-start;
+    padding-top:44px;
+    position:relative; z-index:2;
+  }
+  .logo { height:46px; margin-bottom:26px; }
+  .label {
+    color:var(--orange);
+    font-size:21px; font-weight:700;
+    letter-spacing:7px;
+    margin-bottom:22px;
+  }
+  .h-small {
+    font-size:30px; font-weight:600;
+    letter-spacing:2px;
+    color:var(--white);
+    margin-bottom:10px;
+  }
+  .h-big {
+    font-size:57px; font-weight:900;
+    letter-spacing:1px; line-height:1.08;
+  }
+  .h-giant {
+    font-size:116px; font-weight:900;
+    color:var(--orange);
+    line-height:1.02;
+    letter-spacing:2px;
+    text-shadow:0 6px 30px rgba(255,107,26,0.25);
+  }
+
+  /* ===== DIVISORES (filete diagonal 3px + mini chevrons) ===== */
+  .divider { position:relative; height:0; z-index:5; }
+  .divider .line {
+    position:absolute; left:-30px; width:1140px; height:3px;
+    background:linear-gradient(90deg, transparent 0%, var(--orange) 12%, var(--orange) 88%, transparent 100%);
+  }
+  .divider.d-top .line { top:-8px; transform:rotate(-1.6deg); }
+  .divider.d-bottom .line { top:-8px; transform:rotate(-1.6deg); }
+  .divider .chev {
+    position:absolute; top:-22px;
+    color:var(--orange);
+    font-size:20px; font-weight:900; letter-spacing:-3px;
+    font-family:'Segoe UI',Arial,sans-serif;
+  }
+  .divider.d-top .chev { right:54px; top:-26px; }
+  .divider.d-bottom .chev { left:54px; top:-10px; }
+
+  /* ===== FOTO (inteira, fit por largura) ===== */
+  .photo { width:1080px; height:608px; position:relative; }
+  .photo img {
+    width:1080px; height:608px;
+    object-fit:cover; object-position:50% 50%;
+    display:block;
+  }
+  /* gradientes só nas bordas superior/inferior (céu e rua), longe do letreiro */
+  .photo::before {
+    content:''; position:absolute; left:0; right:0; top:0; height:110px;
+    background:linear-gradient(to bottom, #0A0A0A, transparent);
+  }
+  .photo::after {
+    content:''; position:absolute; left:0; right:0; bottom:0; height:100px;
+    background:linear-gradient(to top, #0A0A0A, transparent);
+  }
+
+  /* ===== RODAPÉ ===== */
+  .bottom {
+    height:318px;
+    display:flex; flex-direction:column; align-items:center;
+    padding-top:18px;
+    position:relative; z-index:2;
+  }
+  .pre {
+    font-size:20px; font-weight:700;
+    letter-spacing:5px; color:#C9C9C9;
+    margin-bottom:8px;
+  }
+  .offer {
+    font-size:88px; font-weight:900; letter-spacing:1px;
+    line-height:1.05; margin-bottom:20px;
+    white-space:nowrap;
+  }
+  .offer .g { color:var(--orange); text-shadow:0 6px 30px rgba(255,107,26,0.25); }
+  .cta {
+    background:linear-gradient(180deg, var(--orange), var(--orange-deep));
+    color:#0A0A0A;
+    font-size:26px; font-weight:900; letter-spacing:0.5px;
+    padding:17px 38px; border-radius:6px;
+    margin-bottom:16px;
+    white-space:nowrap;
+    box-shadow:0 8px 28px rgba(255,107,26,0.30);
+  }
+  .cta .w { color:#FFFFFF; }
+  .cta .gift { font-size:26px; }
+  .fine {
+    font-size:17px; font-weight:500; color:var(--gray);
+    margin-bottom:12px;
+  }
+  .brand {
+    font-size:14px; font-weight:700; letter-spacing:4px;
+    color:var(--orange);
+  }
+</style>
+</head>
+<body>
+<div class="card">
+
+  <div class="top">
+    <img class="logo" src="file:///C:/Users/Acer/territoriofit-site/images/logo.png" alt="Território Fit">
+    <div class="label">• ANIVERSARIANTE DO MÊS •</div>
+    <div class="h-small">NO MÊS DO SEU ANIVERSÁRIO,</div>
+    <div class="h-big">QUEM GANHA O PRESENTE</div>
+    <div class="h-giant">É VOCÊ.</div>
+  </div>
+
+  <div class="divider d-top">
+    <div class="line"></div>
+    <div class="chev">❯❯❯</div>
+  </div>
+
+  <div class="photo">
+    <img src="file:///C:/Users/Acer/territoriofit-site/images/fachada-drone.jpg" alt="Fachada Território Fit">
+  </div>
+
+  <div class="divider d-bottom">
+    <div class="line"></div>
+    <div class="chev">❯❯❯</div>
+  </div>
+
+  <div class="bottom">
+    <div class="pre">VOLTANDO A TREINAR NA TERRITÓRIO, VOCÊ GANHA</div>
+    <div class="offer">2 MESES <span class="g">GRÁTIS</span></div>
+    <div class="cta">RESPONDE <span class="w">*PRESENTE*</span> AQUI NO WHATSAPP E GARANTE O SEU <span class="gift">🎁</span></div>
+    <div class="fine">Condição válida no mês do seu aniversário · no ato da rematrícula</div>
+    <div class="brand">TERRITÓRIO FIT · SUA EVOLUÇÃO CONTINUA AQUI</div>
+  </div>
+
+</div>
+</body>
+</html>
