@@ -7,7 +7,11 @@ Roda a cada ~30min no horario comercial (GitHub Actions) e verifica:
 
   1. ATENDIMENTO PARADO — lead mandou mensagem (individual, instancias de
      atendimento) ha mais de LIMITE_MIN minutos e NINGUEM respondeu
-     (nem consultora nem Clara).
+     (nem consultora nem Clara). Numeros da propria equipe (team_members)
+     ficam de fora. Antes de alertar, uma IA (claude-haiku-4-5, chave da
+     tabela config do CRM) le as ultimas mensagens e descarta conversas ja
+     finalizadas (despedida, assunto resolvido, msg que nao pede resposta);
+     se a IA falhar, o alerta e mantido (fail-open).
   2. RESPOSTA A AUTOMACAO SEM ATENDIMENTO — lead que recebeu um disparo
      (win-back, aniversariantes, regua de cobranca) nos ultimos 7 dias
      respondeu e esta sem resposta humana; o alerta ja vai com o
@@ -95,6 +99,56 @@ def _fecha_conversa(content: str) -> bool:
 def _eh_humana(msg: dict) -> bool:
     sb_ = (msg.get("metadata") or {}).get("sent_by")
     return msg.get("is_from_me") and sb_ != "ai_agent"
+
+
+def _last8(phone: str) -> str:
+    d = "".join(c for c in (phone or "") if c.isdigit())
+    return d[-8:]
+
+
+def _anthropic_key(sb: dict) -> str:
+    """Le a ANTHROPIC_API_KEY da tabela config do CRM (mesma da Clara)."""
+    try:
+        rows = _get(sb, "config", {"select": "value",
+                                   "key": "eq.ANTHROPIC_API_KEY", "limit": "1"})
+        return (rows[0].get("value") or "").strip() if rows else ""
+    except Exception as e:
+        print(f"[ia] erro lendo ANTHROPIC_API_KEY: {e}")
+        return ""
+
+
+def conversa_precisa_resposta(anthropic_key: str, hist: list[dict]) -> bool:
+    """IA le o contexto e decide se a conversa ainda espera resposta da
+    academia. Fail-open: qualquer erro mantem o alerta."""
+    if not anthropic_key:
+        return True
+    transcript = "\n".join(
+        f"[{'Academia' if m['is_from_me'] else 'Cliente'}]: "
+        f"{_trecho(m.get('content'), 200)}"
+        for m in hist[-6:] if (m.get("content") or "").strip())
+    if not transcript:
+        return True
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=anthropic_key)
+        msg = client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=10,
+            system=(
+                "Você analisa conversas de WhatsApp de uma academia "
+                "(Território Fit). Diga se a ÚLTIMA mensagem do cliente "
+                "ainda espera uma resposta da equipe. Conversa encerrada, "
+                "despedida, agradecimento, assunto já resolvido ou "
+                "mensagem que não pede resposta = NAO. Pergunta, pedido, "
+                "interesse, problema não resolvido ou cliente esperando "
+                "retorno = SIM. Responda APENAS a palavra SIM ou NAO."),
+            messages=[{"role": "user", "content": transcript}],
+        )
+        veredito = (msg.content[0].text or "").strip().upper()
+        return not veredito.startswith("NAO")
+    except Exception as e:
+        print(f"[ia] erro na análise ({e}) — mantendo alerta")
+        return True
 
 
 def _respondida(msgs_lead: list[dict], desde_iso: str) -> bool:
@@ -258,16 +312,44 @@ def main() -> int:
                       "ultimos 90min — conferir creditos Anthropic / fila "
                       "(ai_agent_chat_events).")})
 
-    # -- nomes dos leads -------------------------------------------------
+    # -- nomes e fones dos leads -----------------------------------------
     lids = list({a["lead_id"] for a in alertas if a["lead_id"]})
     nomes: dict[str, str] = {}
+    fones_lead: dict[str, str] = {}
     for i in range(0, len(lids), 80):
         for row in _get(sb, "leads", {
-                "select": "id,name",
+                "select": "id,name,phone",
                 "id": f"in.({','.join(lids[i:i + 80])})"}):
             nomes[row["id"]] = row.get("name") or "Lead"
+            fones_lead[row["id"]] = row.get("phone") or ""
+
+    # -- exclui numeros da propria equipe (consultoras etc.) -------------
+    equipe = {_last8(t.get("phone"))
+              for t in _get(sb, "team_members", {"select": "name,phone"})
+              if _last8(t.get("phone"))}
+    antes = len(alertas)
+    alertas = [a for a in alertas
+               if not (a["lead_id"]
+                       and _last8(fones_lead.get(a["lead_id"], "")) in equipe)]
+    if antes != len(alertas):
+        print(f"[equipe] {antes - len(alertas)} caso(s) descartado(s): "
+              "numero e da propria equipe")
 
     novos = [a for a in alertas if a["key"] not in emitidos]
+
+    # -- IA analisa o contexto antes de alertar (so casos novos) ---------
+    if novos:
+        akey = _anthropic_key(sb)
+        mantidos = []
+        for a in novos:
+            if a["tipo"] in ("atendimento_parado", "resposta_automacao"):
+                hist = por_lead.get(a["lead_id"], [])
+                if not conversa_precisa_resposta(akey, hist):
+                    print(f"[ia] {nomes.get(a['lead_id'], '')} — conversa "
+                          "finalizada segundo o contexto, sem alerta")
+                    continue
+            mantidos.append(a)
+        novos = mantidos
     print(f"[monitor] {len(alertas)} caso(s) aberto(s), "
           f"{len(novos)} novo(s) (cooldown {cooldown_h}h)")
     for a in alertas:

@@ -40,7 +40,7 @@ jobs:
           python-version: "3.12"
 
       - name: Instalar dependencias
-        run: pip install requests
+        run: pip install requests anthropic
 
       - name: Rodar monitor
         env:
