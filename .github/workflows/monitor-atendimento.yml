@@ -1,0 +1,51 @@
+# Monitor de Atendimento — vigia continuo dos atendimentos do CRM
+#
+# A cada ~30min (horario comercial) verifica: atendimento parado (nem
+# consultora nem Clara responderam), resposta a automacao sem atendimento
+# (com historico no alerta), transferencia da Clara nao assumida e erros
+# da Clara. Alertas com cooldown de 4h por caso, enviados no WhatsApp
+# pessoal do Andre (instancia Ceo) e logados na aba Equipe Digital.
+#
+# Secrets: SUPABASE_KEY, UAZAPI_TOKEN_CEO
+
+name: Monitor de atendimento (CRM)
+
+on:
+  schedule:
+    - cron: "5,35 12-22 * * *"   # ~09-19 BRT, 2x/hora (GH atrasa cron)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "1 = so listar, sem alertar/gravar"
+        required: false
+        default: ""
+      limite_min:
+        description: "minutos sem resposta p/ alertar (padrao 30)"
+        required: false
+        default: ""
+
+concurrency:
+  group: monitor-atendimento
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: pip install requests
+
+      - name: Rodar monitor
+        env:
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          UAZAPI_TOKEN_CEO: ${{ secrets.UAZAPI_TOKEN_CEO }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          LIMITE_MIN: ${{ github.event.inputs.limite_min || '30' }}
+        run: python monitor_atendimento.py
