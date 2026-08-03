@@ -46,11 +46,12 @@ MSGS = {
         "Tentamos processar a sua mensalidade de *R$ {valor}* no cartão e a "
         "operadora não aprovou — deve ter sido só um probleminha na cobrança "
         "(limite do dia, cartão novo, essas coisas, acontece! 😅)\n\n"
-        "Me responde aqui que a gente resolve rapidinho, tá?"),
-    2: ("Oi, {nome}! Passando só pra lembrar: a operadora do cartão ainda "
-        "não aprovou a sua mensalidade de *R$ {valor}* 😕\n\n"
         "Se for mais fácil, dá pra acertar por *PIX* ou atualizar o cartão "
         "— me responde aqui que nossa consultora te ajuda na hora 💛"),
+    2: ("Oi, {nome}! Passando só pra lembrar: a operadora do cartão ainda "
+        "não aprovou a sua mensalidade de *R$ {valor}* 😕\n\n"
+        "Quer acertar por *PIX* agora mesmo? É só responder essa mensagem "
+        "que nossa consultora te manda a chave na hora 😉"),
     3: ("{nome}, tudo certo por aí? 😊\n\n"
         "Sua mensalidade segue pendente e a gente não quer que isso "
         "atrapalhe seus treinos. Responde essa mensagem que encontramos "
