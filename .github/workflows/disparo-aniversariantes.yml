@@ -6,16 +6,16 @@
 # mantida pelo sincronizar_diario) e ultimo acesso na catraca em ate 24
 # meses. Dedup em agent_activity = 1 envio por pessoa por mes.
 #
-# O cron esta DESATIVADO ate o Andre aprovar arte + copy — validar antes
-# com workflow_dispatch (dry_run=1 e depois test_to) e ai descomentar.
+# Aprovado pelo Andre em 2026-08-03 (arte + copy validados com test_to).
+# Campanha perene: a lista renova sozinha a cada mes via sincronizar_diario.
 #
 # Secrets: SUPABASE_KEY, UAZAPI_TOKEN_2000
 
 name: Disparo aniversariantes inativos (WhatsApp)
 
 on:
-  # schedule:
-  #   - cron: "40 13 * * 1-6"   # 10:40 BRT seg-sab (apos o win-back das 10:10)
+  schedule:
+    - cron: "40 13 * * 1-6"   # 10:40 BRT seg-sab (apos o win-back das 10:10)
   workflow_dispatch:
     inputs:
       dry_run:
