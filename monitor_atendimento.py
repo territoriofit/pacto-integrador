@@ -130,6 +130,27 @@ def _last8(phone: str) -> str:
     return d[-8:]
 
 
+def _academia_aberta(sb: dict, agora) -> bool:
+    """Janela = horario de FUNCIONAMENTO da academia, lido do
+    settings.business_hours do agente (mesma fonte da Clara):
+    {"0": ["08:00","13:00"], ...} com 0=domingo, horarios em BRT.
+    Sem config (ou erro), cai no fallback 08-20 BRT (janela antiga)."""
+    try:
+        rows = _get(sb, "ai_sales_agents", {
+            "select": "settings", "is_active": "eq.true", "limit": "1"})
+        hours = (rows[0].get("settings") or {}).get("business_hours") if rows else None
+        if isinstance(hours, dict):
+            dow_js = (agora.weekday() + 1) % 7  # python seg=0 -> js dom=0
+            faixa = hours.get(str(dow_js))
+            if not (isinstance(faixa, list) and len(faixa) >= 2):
+                return False  # dia sem faixa = fechado
+            hhmm = f"{agora.hour:02d}:{agora.minute:02d}"
+            return faixa[0] <= hhmm <= faixa[1]
+    except Exception as e:
+        print(f"[janela] erro lendo business_hours ({e}) — fallback 08-20")
+    return 8 <= agora.hour < 20
+
+
 def _anthropic_key(sb: dict) -> str:
     """Le a ANTHROPIC_API_KEY da tabela config do CRM (mesma da Clara)."""
     try:
@@ -192,12 +213,11 @@ def main() -> int:
         print("Faltam envs SUPABASE_KEY / UAZAPI_TOKEN_CEO")
         return 1
 
-    agora = datetime.now(TZ_SP)
-    if not (8 <= agora.hour < 20) and not dry:
-        print(f"[janela] {agora:%H:%M} BRT — fora do horario, nada a fazer.")
-        return 0
-
     sb = _sb(key)
+    agora = datetime.now(TZ_SP)
+    if not _academia_aberta(sb, agora) and not dry:
+        print(f"[janela] {agora:%H:%M} BRT — academia fechada, nada a fazer.")
+        return 0
     utc_agora = datetime.now(timezone.utc)
     h48 = (utc_agora - timedelta(hours=48)).isoformat()
     d7 = (utc_agora - timedelta(days=7)).isoformat()

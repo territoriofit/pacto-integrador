@@ -12,7 +12,7 @@ name: Monitor de atendimento (CRM)
 
 on:
   schedule:
-    - cron: "5,35 12-22 * * *"   # ~09-19 BRT, 2x/hora (GH atrasa cron)
+    - cron: "5,35 0-2,8-23 * * *"   # 05-23 BRT (horario da academia), 2x/hora; o script corta pelo business_hours real do dia
   workflow_dispatch:
     inputs:
       dry_run:
