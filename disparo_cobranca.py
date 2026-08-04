@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 """
 Regua de cobranca: alunos com parcela recusada na 2a tentativa de cobranca
-no cartao (parcelas_atrasadas.nr_tentativas >= 2) recebem ate 4 mensagens
+no cartao (parcelas_atrasadas.nr_tentativas >= 1) recebem ate 4 mensagens
 amigaveis, 1 por dia, em dias consecutivos.
 
 Fluxo diario (GitHub Actions):
   1. Busca em parcelas_atrasadas (sync diario do Pacto) as parcelas com
-     nr_tentativas >= 2 e dias_atraso <= MAX_DIAS_ATRASO (padrao 30) —
+     nr_tentativas >= MIN_TENTATIVAS (padrao 1, decisao Andre 04/08 —
+     dispara ja na 1a recusa) e dias_atraso <= MAX_DIAS_ATRASO (padrao 30) —
      1 regua por aluno, ancorada na parcela mais antiga em aberto.
   2. Estado da regua em agent_activity (metadata.disparo_key =
      "cobranca-<parcela_codigo>-p1..p4"): envia o proximo passo se o
@@ -23,7 +24,7 @@ Quem responder cai na consultora no inbox (aluno ja e lead; o fallback da
 Clara so pega contato novo).
 
 Env: SUPABASE_KEY, UAZAPI_TOKEN_2000.
-Opcional: MAX_DIAS_ATRASO=n (padrao 30) | HORA_INICIO=h (padrao 9) |
+Opcional: MIN_TENTATIVAS=n (padrao 1) | MAX_DIAS_ATRASO=n (padrao 30) | HORA_INICIO=h (padrao 9) |
 DRY_RUN=1 (so lista) | TEST_TO=5516... (envia 1 exemplo do p1, sem gravar
 dedup) | MAX_POR_RUN=n (padrao 30).
 """
@@ -103,13 +104,13 @@ def aguardar_janela_comercial(hora_inicio: int) -> bool:
     return True
 
 
-def buscar_alvos(sb: dict, max_dias: int) -> list[dict]:
-    """1 regua por aluno: parcela mais antiga com nr_tentativas>=2."""
+def buscar_alvos(sb: dict, max_dias: int, min_tentativas: int) -> list[dict]:
+    """1 regua por aluno: parcela mais antiga com nr_tentativas>=min."""
     r = requests.get(
         f"{SUPABASE_URL}/rest/v1/parcelas_atrasadas",
         params={"select": "lead_id,nome_aluno,parcela_codigo,valor,"
                           "data_vencimento,dias_atraso,nr_tentativas",
-                "nr_tentativas": "gte.2",
+                "nr_tentativas": f"gte.{min_tentativas}",
                 "dias_atraso": f"lte.{max_dias}",
                 "order": "data_vencimento.asc",
                 "limit": "1000"},
@@ -118,8 +119,8 @@ def buscar_alvos(sb: dict, max_dias: int) -> list[dict]:
     por_lead: dict[str, dict] = {}
     for p in r.json():
         por_lead.setdefault(p["lead_id"], p)  # 1a = mais antiga (order asc)
-    print(f"[crm] {len(por_lead)} aluno(s) com parcela recusada 2x "
-          f"(atraso ate {max_dias}d)")
+    print(f"[crm] {len(por_lead)} aluno(s) com parcela recusada "
+          f"{min_tentativas}x+ (atraso ate {max_dias}d)")
     return list(por_lead.values())
 
 
@@ -178,16 +179,17 @@ def main() -> int:
     max_por_run = int(os.environ.get("MAX_POR_RUN", "30"))
     hora_inicio = int(os.environ.get("HORA_INICIO", "9"))
     max_dias = int(os.environ.get("MAX_DIAS_ATRASO", "30"))
+    min_tentativas = int(os.environ.get("MIN_TENTATIVAS", "1"))
     if not key or (not zap and not dry):
         print("Faltam envs SUPABASE_KEY / UAZAPI_TOKEN_2000")
         return 1
 
-    print("[campanha] regua de cobranca (parcelas recusadas 2x)")
+    print(f"[campanha] regua de cobranca (parcelas recusadas {min_tentativas}x+)")
     if not dry and not test_to and not aguardar_janela_comercial(hora_inicio):
         return 0
 
     sb = _sb_headers(key)
-    alvos = buscar_alvos(sb, max_dias)
+    alvos = buscar_alvos(sb, max_dias, min_tentativas)
     if not alvos:
         print("Nenhum alvo hoje.")
         return 0
