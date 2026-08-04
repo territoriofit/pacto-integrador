@@ -7,7 +7,9 @@
 # por pessoa — quando a lista esgotar, os runs passam a enviar 0.
 #
 # ~81 alvos no lancamento (2026-07-30) => ~3 dias de disparo.
-# Horario: 10:10 BRT seg-sab (domingo nao envia).
+# Horario: 9:00 BRT seg-sab (domingo nao envia). O cron dispara 06:07 BRT
+# de proposito — o GH Actions atrasa ~2,5-3h e o HORA_INICIO=9 segura o
+# inicio real (sequencia do dia: maio 8h, abril 9h, aniver 10h, cobranca 11h).
 #
 # Secrets: SUPABASE_KEY, UAZAPI_TOKEN_2000, PACTO_TOKEN, PACTO_CHAVE
 
@@ -15,7 +17,7 @@ name: Disparo win-back abril (WhatsApp)
 
 on:
   schedule:
-    - cron: "10 13 * * 1-6"
+    - cron: "7 9 * * 1-6"   # 06:07 BRT; atraso do GH ~2,5-3h + HORA_INICIO=9 => envio ~9h
   workflow_dispatch:
     inputs:
       dry_run:
@@ -38,7 +40,7 @@ concurrency:
 jobs:
   disparo:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
 
@@ -56,6 +58,7 @@ jobs:
           PACTO_TOKEN: ${{ secrets.PACTO_TOKEN }}
           PACTO_CHAVE: ${{ secrets.PACTO_CHAVE }}
           CAMPANHA_MES: "2026-04"
+          HORA_INICIO: "9"
           DRY_RUN: ${{ github.event.inputs.dry_run }}
           MAX_POR_RUN: ${{ github.event.inputs.max_por_run || '35' }}
           TEST_TO: ${{ github.event.inputs.test_to }}

@@ -1,12 +1,14 @@
 # Campanha win-back — ex-alunos que nao renovaram em maio/2026
 #
 # Mesmo motor da campanha de abril (disparo_winback.py), com
-# CAMPANHA_MES=2026-05 e inicio as 08:00 BRT (pedido do Andre 30/07:
-# "amanha 31/07 faz a de maio as 8:00"). O cron dispara 07:40 BRT e o
-# script aguarda a janela; roda seg-sab ate a lista esgotar.
+# CAMPANHA_MES=2026-05 e inicio as 08:00 BRT (pedido do Andre 30/07,
+# reforcado 04/08: "comecar a disparar as 8:00"). O cron dispara 05:07 BRT
+# de proposito — o scheduler do GH Actions atrasa ~2,5-3h, entao o run cai
+# perto das 8h e o HORA_INICIO segura o inicio real; roda seg-sab ate a
+# lista esgotar.
 #
 # Anti-bloqueio: 90-150s entre mensagens e teto de 35/dia POR campanha
-# (abril roda 10:10 no mesmo numero — espacamento protege a instancia).
+# (abril roda 9:00 no mesmo numero — espacamento protege a instancia).
 #
 # Secrets: SUPABASE_KEY, UAZAPI_TOKEN_2000, PACTO_TOKEN, PACTO_CHAVE
 
@@ -14,7 +16,7 @@ name: Disparo win-back maio (WhatsApp)
 
 on:
   schedule:
-    - cron: "40 10 * * 1-6"
+    - cron: "7 8 * * 1-6"   # 05:07 BRT; atraso do GH ~2,5-3h + HORA_INICIO=8 => envio ~8h
   workflow_dispatch:
     inputs:
       dry_run:

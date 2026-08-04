@@ -18,7 +18,7 @@ name: Disparo regua de cobranca (WhatsApp)
 
 on:
   schedule:
-    - cron: "20 14 * * *"   # 11:20 BRT todos os dias (apos as campanhas)
+    - cron: "7 11 * * *"   # 08:07 BRT; atraso do GH ~2,5-3h + HORA_INICIO=11 => envio ~11h (apos as campanhas)
   workflow_dispatch:
     inputs:
       dry_run:
@@ -45,7 +45,7 @@ concurrency:
 jobs:
   disparo:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
 
@@ -61,6 +61,7 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           UAZAPI_TOKEN_2000: ${{ secrets.UAZAPI_TOKEN_2000 }}
           UAZAPI_TOKEN_CEO: ${{ secrets.UAZAPI_TOKEN_CEO }}
+          HORA_INICIO: "11"
           DRY_RUN: ${{ github.event.inputs.dry_run }}
           MAX_POR_RUN: ${{ github.event.inputs.max_por_run || '30' }}
           TEST_TO: ${{ github.event.inputs.test_to }}

@@ -15,7 +15,7 @@ name: Disparo aniversariantes inativos (WhatsApp)
 
 on:
   schedule:
-    - cron: "40 13 * * 1-6"   # 10:40 BRT seg-sab (apos o win-back das 10:10)
+    - cron: "7 10 * * 1-6"   # 07:07 BRT; atraso do GH ~2,5-3h + HORA_INICIO=10 => envio ~10h (apos win-back 8h/9h)
   workflow_dispatch:
     inputs:
       dry_run:
@@ -42,7 +42,7 @@ concurrency:
 jobs:
   disparo:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
 
@@ -57,6 +57,7 @@ jobs:
         env:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           UAZAPI_TOKEN_2000: ${{ secrets.UAZAPI_TOKEN_2000 }}
+          HORA_INICIO: "10"
           DRY_RUN: ${{ github.event.inputs.dry_run }}
           MAX_POR_RUN: ${{ github.event.inputs.max_por_run || '25' }}
           TEST_TO: ${{ github.event.inputs.test_to }}
