@@ -113,6 +113,15 @@ def main() -> int:
     if not dry and not aguardar_janela_comercial():
         return 0
 
+    # horario alternado (pedido Andre 04/08): atraso aleatorio de ate
+    # JITTER_MAX_MIN (padrao 40min) pra nao disparar sempre no mesmo
+    # horario todo dia — padrao anti-bloqueio do WhatsApp
+    jitter_max = int(os.environ.get("JITTER_MAX_MIN", "40"))
+    if not dry and not test_to and jitter_max > 0:
+        atraso = random.uniform(0, jitter_max * 60)
+        print(f"[jitter] variando horario do disparo: +{int(atraso // 60)}min")
+        time.sleep(atraso)
+
     sb = _sb_headers(key)
     hoje = datetime.now(TZ_SP).date()
     enviados, pulados, sem_fone = 0, 0, []
@@ -199,7 +208,7 @@ def main() -> int:
                     timeout=30)
 
             # boas práticas: 60s + jitter entre mensagens
-            time.sleep(60 + random.uniform(0, 15))
+            time.sleep(90 + random.uniform(0, 60))
 
     print(f"\nResumo: {enviados} enviado(s), {pulados} já enviados antes, "
           f"{len(sem_fone)} sem telefone")
