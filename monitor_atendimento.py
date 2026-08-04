@@ -60,6 +60,29 @@ def _get(sb: dict, tabela: str, params: dict) -> list[dict]:
     return r.json()
 
 
+def _get_all(sb: dict, tabela: str, params: dict,
+             max_rows: int = 20000) -> list[dict]:
+    """PostgREST corta silenciosamente em 1000 linhas por request (um
+    limit=8000 volta 1000 sem erro) — pagina via header Range ate vir
+    pagina incompleta. Sem isso o monitor enxergava so as msgs mais
+    antigas da janela e alertava conversa ja respondida."""
+    pagina = 1000
+    out: list[dict] = []
+    params = {k: v for k, v in params.items() if k != "limit"}
+    while len(out) < max_rows:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/{tabela}", params=params,
+            headers={**sb, "Range-Unit": "items",
+                     "Range": f"{len(out)}-{len(out) + pagina - 1}"},
+            timeout=60)
+        r.raise_for_status()
+        chunk = r.json()
+        out.extend(chunk)
+        if len(chunk) < pagina:
+            break
+    return out
+
+
 def _mins(iso: str) -> int:
     try:
         dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
@@ -79,7 +102,8 @@ def _trecho(txt: str, n: int = 70) -> str:
 
 _FECHAMENTOS = {
     "ok", "okay", "okk", "obrigado", "obrigada", "ok obrigado",
-    "ok obrigada", "obg", "valeu", "vlw", "blz", "beleza", "imagina",
+    "ok obrigada", "obg", "valeu", "vlw", "blz", "beleza", "belezinha",
+    "imagina",
     "de nada", "denada", "ta bom", "tá bom", "ta bem", "tudo bem",
     "certo", "show", "top", "perfeito", "combinado", "entendi", "sim",
     "boa", "otimo", "ótimo", "legal", "maravilha", "aham", "uhum",
@@ -186,10 +210,10 @@ def main() -> int:
                              for x in INSTANCIAS_FORA)}
 
     # -- mensagens individuais das ultimas 48h ---------------------------
-    msgs = _get(sb, "whatsapp_messages", {
+    msgs = _get_all(sb, "whatsapp_messages", {
         "select": "lead_id,instance_id,is_from_me,sent_at,content,metadata",
         "group_id": "is.null", "sent_at": f"gte.{h48}",
-        "order": "sent_at.asc", "limit": "8000"})
+        "order": "sent_at.asc"})
     por_lead: dict[str, list[dict]] = {}
     for m in msgs:
         if m.get("lead_id") and (m.get("instance_id") in inst_atend
@@ -206,9 +230,9 @@ def main() -> int:
 
     # -- disparos de automacao dos ultimos 7d ----------------------------
     disparos: dict[str, dict] = {}  # lead_id -> ultimo disparo
-    for r in _get(sb, "agent_activity", {
+    for r in _get_all(sb, "agent_activity", {
             "select": "title,created_at,metadata",
-            "created_at": f"gte.{d7}", "limit": "3000"}):
+            "created_at": f"gte.{d7}"}):
         meta = r.get("metadata") or {}
         lid = meta.get("lead_id")
         if lid and meta.get("disparo_key"):
