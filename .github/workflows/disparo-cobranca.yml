@@ -1,14 +1,18 @@
-# Regua de cobranca — parcelas recusadas na 2a tentativa no cartao
+# Regua de cobranca — recorrentes com cartao recusado (1a tentativa ja entra)
 #
 # Ate 4 mensagens amigaveis, 1 por dia, por aluno (tom "problema na
-# operadora do cartao"). Pausa se a consultora ja falou com o aluno depois
-# da 1a mensagem; morre sozinha quando a parcela e paga (sai da tabela
+# operadora do cartao"). Se a consultora ja falou com o aluno depois da 1a
+# mensagem, uma IA analisa a conversa: cobranca em acompanhamento ativo ->
+# pausa; conversa morta sem encaminhamento -> regua RETOMA (decisao Andre
+# 04/08). Morre sozinha quando a parcela e paga (sai da tabela
 # parcelas_atrasadas no sync diario). Whats 2000, 90-150s entre envios.
+# No fim de cada run manda relatorio no WhatsApp pessoal do Andre
+# (instancia Ceo).
 #
 # Textos aprovados pelo Andre em 2026-08-03 (validados com test_to).
 # Roda TODO DIA (dias consecutivos fazem parte da cadencia da regua).
 #
-# Secrets: SUPABASE_KEY, UAZAPI_TOKEN_2000
+# Secrets: SUPABASE_KEY, UAZAPI_TOKEN_2000, UAZAPI_TOKEN_CEO
 
 name: Disparo regua de cobranca (WhatsApp)
 
@@ -50,12 +54,13 @@ jobs:
           python-version: "3.12"
 
       - name: Instalar dependencias
-        run: pip install requests
+        run: pip install requests anthropic
 
       - name: Disparar regua de cobranca
         env:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           UAZAPI_TOKEN_2000: ${{ secrets.UAZAPI_TOKEN_2000 }}
+          UAZAPI_TOKEN_CEO: ${{ secrets.UAZAPI_TOKEN_CEO }}
           DRY_RUN: ${{ github.event.inputs.dry_run }}
           MAX_POR_RUN: ${{ github.event.inputs.max_por_run || '30' }}
           TEST_TO: ${{ github.event.inputs.test_to }}

@@ -171,6 +171,83 @@ def consultora_assumiu(sb: dict, lead_id: str, desde_iso: str) -> bool:
     return bool(r.json())
 
 
+def _anthropic_key(sb: dict) -> str:
+    """ANTHROPIC_API_KEY da tabela config do CRM (mesma da Clara/monitor)."""
+    try:
+        r = requests.get(f"{SUPABASE_URL}/rest/v1/config",
+                         params={"select": "value",
+                                 "key": "eq.ANTHROPIC_API_KEY", "limit": "1"},
+                         headers=sb, timeout=30)
+        rows = r.json()
+        return (rows[0].get("value") or "").strip() if rows else ""
+    except Exception as e:
+        print(f"[ia] erro lendo ANTHROPIC_API_KEY: {e}")
+        return ""
+
+
+def acompanhamento_ativo(akey: str, sb: dict, lead_id: str, valor: str) -> bool:
+    """Consultora falou com o aluno — mas esta ACOMPANHANDO a cobranca?
+    IA le as ultimas mensagens e responde SIM (negociacao encaminhada:
+    data/forma de pagamento combinada, consultora cobrando retorno) ou
+    NAO (conversa morreu sem encaminhamento da parcela). Fail-safe: em
+    erro retorna True (mantem a pausa — nao cobra quem pode estar
+    negociando). Decisao Andre 04/08: sem acompanhamento, regua retoma."""
+    if not akey:
+        return True
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/whatsapp_messages",
+            params={"select": "is_from_me,content,sent_at",
+                    "lead_id": f"eq.{lead_id}", "group_id": "is.null",
+                    "order": "sent_at.desc", "limit": "12"},
+            headers=sb, timeout=30)
+        hist = list(reversed(r.json()))
+        transcript = "\n".join(
+            f"[{'Academia' if m['is_from_me'] else 'Aluno'} "
+            f"{(m.get('sent_at') or '')[:16]}]: "
+            f"{' '.join((m.get('content') or '').split())[:200]}"
+            for m in hist if (m.get("content") or "").strip())
+        if not transcript:
+            return False
+        import anthropic
+        client = anthropic.Anthropic(api_key=akey)
+        msg = client.messages.create(
+            model="claude-haiku-4-5", max_tokens=10,
+            system=(
+                "Você analisa conversas de WhatsApp entre uma academia e um "
+                f"aluno com mensalidade de R$ {valor} atrasada (cartão "
+                "recusado). Diga se a cobrança está com ACOMPANHAMENTO ATIVO "
+                "da equipe: pagamento já combinado (data/PIX/cartão), "
+                "negociação em andamento ou equipe cobrando retorno "
+                "recentemente = SIM. Conversa parada sem encaminhamento do "
+                "pagamento, assunto mudou ou aluno sumiu sem a equipe "
+                "insistir = NAO. Responda APENAS SIM ou NAO."),
+            messages=[{"role": "user", "content": transcript}])
+        veredito = (msg.content[0].text or "").strip().upper()
+        return not veredito.startswith("NAO")
+    except Exception as e:
+        print(f"[ia] erro na analise de acompanhamento ({e}) — mantendo pausa")
+        return True
+
+
+def _envia_relatorio_whats(linhas: list[str]) -> None:
+    """Resumo do run pro WhatsApp pessoal do Andre (instancia Ceo)."""
+    token = os.environ.get("UAZAPI_TOKEN_CEO", "").strip()
+    destino = os.environ.get("RELATORIO_PARA", "5516992290338").strip()
+    if not token:
+        print("[relatorio] UAZAPI_TOKEN_CEO ausente — relatorio nao enviado")
+        return
+    try:
+        resp = requests.post(
+            f"{UAZAPI_URL}/send/text",
+            headers={"token": token, "Content-Type": "application/json"},
+            json={"number": destino, "text": "\n".join(linhas).strip()},
+            timeout=120)
+        print(f"[relatorio] -> ...{destino[-4:]} HTTP {resp.status_code}")
+    except Exception as e:
+        print(f"[relatorio] falhou: {e}")
+
+
 def main() -> int:
     key = os.environ.get("SUPABASE_KEY", "").strip()
     zap = os.environ.get("UAZAPI_TOKEN_2000", "").strip()
@@ -198,6 +275,10 @@ def main() -> int:
     hoje = datetime.now(TZ_SP).date().isoformat()
 
     enviados, pausados, em_dia, concluidos, sem_fone = 0, 0, 0, 0, []
+    rel_enviados: list[str] = []
+    rel_pausados: list[str] = []
+    rel_retomados: list[str] = []
+    akey = _anthropic_key(sb)
 
     for a in alvos:
         if enviados >= max_por_run:
@@ -217,11 +298,21 @@ def main() -> int:
             continue
 
         # trava da consultora: humano falou com o aluno depois do p1?
+        # Refinada 04/08 (pedido do Andre): so pausa se a IA confirmar que
+        # a cobranca esta com acompanhamento ATIVO; conversa morta sem
+        # encaminhamento -> regua RETOMA os disparos.
+        retomada = False
         if ultimo >= 1 and consultora_assumiu(sb, a["lead_id"], passos[1]):
-            print(f"[pausa] {nome} — consultora ja falou com o aluno, "
-                  "regua pausada.")
-            pausados += 1
-            continue
+            if acompanhamento_ativo(akey, sb, a["lead_id"],
+                                    _valor_br(a.get("valor"))):
+                print(f"[pausa] {nome} — consultora acompanhando a "
+                      "cobranca, regua pausada.")
+                pausados += 1
+                rel_pausados.append(nome.title())
+                continue
+            retomada = True
+            print(f"[retoma] {nome} — consultora falou mas cobranca sem "
+                  "acompanhamento, regua segue.")
 
         fone = _fone_55(fones.get(a["lead_id"], ""))
         if not fone:
@@ -252,6 +343,13 @@ def main() -> int:
             continue
 
         enviados += 1
+        rel_linha = (f"{nome.title()} (p{passo}, R$ "
+                     f"{_valor_br(a.get('valor'))}, "
+                     f"{a.get('dias_atraso')}d)")
+        if retomada:
+            rel_retomados.append(rel_linha)
+        else:
+            rel_enviados.append(rel_linha)
         if test_to:
             print("[teste] enviado 1 exemplo pro TEST_TO — encerrando.")
             return 0
@@ -265,12 +363,16 @@ def main() -> int:
                             f"{_valor_br(a.get('valor'))} recusada "
                             f"{a.get('nr_tentativas')}x no cartao "
                             f"(venc. {a.get('data_vencimento')}) "
-                            "pelo Whats 2000",
+                            "pelo Whats 2000" +
+                            (" — regua RETOMADA (consultora falou mas "
+                             "cobranca sem acompanhamento)" if retomada
+                             else ""),
                   "status": "concluido",
                   "metadata": {"disparo_key": f"cobranca-{cod}-p{passo}",
                                "campanha": "cobranca-regua",
                                "parcela_codigo": cod,
                                "passo": passo,
+                               "retomada_sem_acompanhamento": retomada,
                                "lead_id": a["lead_id"]}},
             timeout=30)
 
@@ -294,6 +396,40 @@ def main() -> int:
                             "reguas concluidas.",
                   "status": "concluido"},
             timeout=30)
+
+    # relatorio diario pro WhatsApp do Andre (pedido 04/08)
+    if not dry and not test_to:
+        agora_sp = datetime.now(TZ_SP)
+        linhas = [f"🧾 *Régua de cobrança (recorrentes)* — "
+                  f"{agora_sp:%d/%m %H:%M}", ""]
+        if rel_enviados:
+            linhas.append(f"📤 *{len(rel_enviados)} cobrança(s) enviada(s):*")
+            linhas += [f"  • {x}" for x in rel_enviados]
+            linhas.append("")
+        if rel_retomados:
+            linhas.append(f"🔁 *{len(rel_retomados)} retomada(s)* — "
+                          "consultora chegou a falar, mas a cobrança estava "
+                          "sem acompanhamento (IA analisou a conversa):")
+            linhas += [f"  • {x}" for x in rel_retomados]
+            linhas.append("")
+        if rel_pausados:
+            linhas.append(f"🤝 *{len(rel_pausados)} pausada(s)* — cobrança em "
+                          "acompanhamento ativo pela consultora: "
+                          + ", ".join(rel_pausados))
+            linhas.append("")
+        extras = []
+        if em_dia:
+            extras.append(f"{em_dia} já receberam o passo de hoje")
+        if concluidos:
+            extras.append(f"{concluidos} régua(s) concluída(s) (4 msgs)")
+        if sem_fone:
+            extras.append(f"sem telefone: {', '.join(sem_fone)}")
+        if extras:
+            linhas.append("ℹ️ " + " | ".join(extras))
+        if not (rel_enviados or rel_retomados or rel_pausados):
+            linhas.append("Nenhum disparo hoje — todos em dia, pagos ou "
+                          "em acompanhamento.")
+        _envia_relatorio_whats(linhas)
     return 0
 
 
