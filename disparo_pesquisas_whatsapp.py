@@ -10,9 +10,12 @@ Fluxo diário (GitHub Actions, horários alternados por dia da semana):
   2. Resolve o telefone do aluno pela tabela leads (match exato de nome,
      case-insensitive). Telefone do Pacto vem sem 55 — prefixa.
   3. Dedup por linha em agent_activity (metadata.disparo_key = "<contrato>-d3").
-  4. Envia pela instância UazAPI "Whats TF 2000" com intervalo de 60s + jitter
-     (boas práticas anti-bloqueio) e registra cada envio no feed da Equipe
-     Digital do CRM.
+  4. Cria 1 linha em nps_envios (token único → link personalizado do NPS
+     PRÓPRIO em crm.territoriofit.com.br/pesquisa/<token>; desde 05/08/2026
+     substitui os links fixos da WeHelp — resposta entra IDENTIFICADA) e
+     envia pela instância UazAPI "Whats TF 2000" com intervalo de 60s +
+     jitter (boas práticas anti-bloqueio), registrando cada envio no feed
+     da Equipe Digital do CRM.
 
 Janela de envio: 09:00-19:30 BRT (o scheduler do Actions atrasa; antes das
 9h o job espera, depois das 19h30 aborta e a janela de datas cobre no dia
@@ -25,6 +28,7 @@ para esse número, sem gravar dedup).
 
 import os
 import random
+import secrets
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -34,6 +38,7 @@ import requests
 SUPABASE_URL = "https://bmnyhaxvlifmwkcuglfh.supabase.co"
 TENANT_ID = "4eeff494-6528-4f49-8a5c-2742eabb8c2c"
 UAZAPI_URL = "https://territoriofit.uazapi.com"
+PESQUISA_BASE_URL = "https://crm.territoriofit.com.br/pesquisa/"
 
 TZ_SP = timezone(timedelta(hours=-3))
 
@@ -41,7 +46,7 @@ CAMPANHAS = [
     {
         "dia": 3,
         "janela_dias": (3, 5),      # data_venda entre hoje-5 e hoje-3
-        "link": "https://l.wehelpsoftware.com/ae3e5310",
+        "pesquisa": "3d",
         "msg": (
             "Oi, {nome}! Aqui é da Território Fit 💛\n\n"
             "Você acabou de completar seus primeiros dias com a gente e "
@@ -54,7 +59,7 @@ CAMPANHAS = [
     {
         "dia": 10,
         "janela_dias": (10, 12),    # data_venda entre hoje-12 e hoje-10
-        "link": "https://l.wehelpsoftware.com/f9f43c26",
+        "pesquisa": "10d",
         "msg": (
             "Oi, {nome}! Território Fit por aqui 💛\n\n"
             "Já são quase 2 semanas de treino com a gente — que demais! 🎉\n\n"
@@ -84,6 +89,24 @@ def _fone_55(phone: str) -> str | None:
     if len(d) in (12, 13) and d.startswith("55"):
         return d
     return None
+
+
+def criar_envio(sb: dict, pesquisa: str, nome: str, fone: str,
+                lead_id: str | None, canal: str, contrato) -> tuple[str, str] | None:
+    """Cria a linha em nps_envios; retorna (envio_id, link) ou None."""
+    token = secrets.token_urlsafe(8)
+    r = requests.post(
+        f"{SUPABASE_URL}/rest/v1/nps_envios",
+        headers={**sb, "Prefer": "return=representation"},
+        json={"token": token, "person_name": nome, "phone": fone,
+              "lead_id": lead_id, "pesquisa": pesquisa, "canal": canal,
+              "metadata": {"codigo_contrato": contrato}},
+        timeout=30)
+    if r.status_code not in (200, 201):
+        print(f"[envio] falha ao criar envio de {nome}: "
+              f"HTTP {r.status_code} {r.text[:200]}")
+        return None
+    return r.json()[0]["id"], PESQUISA_BASE_URL + token
 
 
 def aguardar_janela_comercial() -> bool:
@@ -161,7 +184,7 @@ def main() -> int:
             # telefone via leads (match exato case-insensitive)
             rl = requests.get(
                 f"{SUPABASE_URL}/rest/v1/leads",
-                params={"select": "phone,name",
+                params={"select": "id,phone,name",
                         "tenant_id": f"eq.{TENANT_ID}",
                         "name": f"ilike.{nome}",
                         "limit": "2"},
@@ -170,15 +193,23 @@ def main() -> int:
             if not fone:
                 sem_fone.append(f"{nome} ({v['data_venda']})")
                 continue
+            lead_id = rl[0].get("id")
 
-            destino = test_to or fone
-            texto = camp["msg"].format(nome=_primeiro_nome(nome),
-                                       link=camp["link"])
             if dry:
                 print(f"[DRY] d{camp['dia']} -> {nome} ({fone})")
                 enviados += 1
                 continue
 
+            # link próprio personalizado (nps_envios; substitui a WeHelp)
+            canal = "teste" if test_to else "whatsapp"
+            criado = criar_envio(sb, camp["pesquisa"], nome, fone,
+                                 lead_id, canal, contrato)
+            if not criado:
+                continue
+            envio_id, link = criado
+
+            destino = test_to or fone
+            texto = camp["msg"].format(nome=_primeiro_nome(nome), link=link)
             resp = requests.post(
                 f"{UAZAPI_URL}/send/text",
                 headers={"token": zap, "Content-Type": "application/json"},
@@ -188,6 +219,10 @@ def main() -> int:
                   f"HTTP {resp.status_code}")
             if not ok:
                 print("       resp:", resp.text[:200])
+                # envio não saiu — remove a linha pra não poluir métricas
+                requests.delete(f"{SUPABASE_URL}/rest/v1/nps_envios",
+                                params={"id": f"eq.{envio_id}"},
+                                headers=sb, timeout=30)
                 continue
 
             enviados += 1

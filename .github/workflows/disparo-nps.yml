@@ -1,0 +1,48 @@
+# Disparo diário do NPS próprio por WhatsApp (substitui o NPS por e-mail
+# da WeHelp). Base: alunos com acesso à catraca nos últimos 7 dias, com
+# cooldowns via nps_envios (45d qualquer pesquisa / 90d NPS / 180d após
+# responder) e máximo de 25 envios/dia. Link personalizado por aluno em
+# crm.territoriofit.com.br/pesquisa/<token> — resposta entra identificada
+# na aba Pesquisa do CRM.
+#
+# Horário: seg-sáb 11:10 BRT (14:10 UTC) + jitter interno de até 40min.
+# O script tem guarda de janela comercial (09:00-19:30 BRT).
+#
+# Secrets: SUPABASE_KEY, UAZAPI_TOKEN_2000
+
+name: Disparo NPS proprio (WhatsApp)
+
+on:
+  schedule:
+    - cron: "10 14 * * 1-6"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "1 = só listar, sem enviar"
+        required: false
+        default: ""
+
+concurrency:
+  group: disparo-nps
+  cancel-in-progress: false
+
+jobs:
+  disparo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: pip install requests
+
+      - name: Disparar NPS
+        env:
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          UAZAPI_TOKEN_2000: ${{ secrets.UAZAPI_TOKEN_2000 }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: python disparo_nps.py

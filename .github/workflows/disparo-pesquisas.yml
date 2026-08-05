@@ -1,4 +1,6 @@
-# Disparo WhatsApp das pesquisas de alunos novos (3d e 10d) — WeHelp links
+# Disparo WhatsApp das pesquisas de alunos novos (3d e 10d) — links do NPS
+# próprio (crm.territoriofit.com.br/pesquisa/<token>) desde 05/08/2026;
+# antes usava links fixos da WeHelp.
 #
 # Envia pela instância UazAPI "Whats TF 2000" com 60s+jitter entre mensagens
 # (boas práticas anti-bloqueio) e horários ALTERNADOS por dia da semana
