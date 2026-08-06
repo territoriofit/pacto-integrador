@@ -1,0 +1,70 @@
+# Campanha Indica Território — alunos novos matriculados em julho/2026
+#
+# Convite pro programa de indicação (1 mês grátis pra quem indica + 1 pro
+# indicado; brinde aos 5; *FIT6/FIT12 por tempo limitado) pela instância
+# "Whats TF 2000", máx 20/dia com 90-150s entre envios, até esgotar a lista.
+# Quando esgotar, avisa o André no WhatsApp (instância CEO) e os runs
+# seguintes encerram cedo (dedup indicacao-julho26-CONCLUIDA).
+#
+# Horário: ~12h BRT seg-sab (cron 09:07 BRT + atraso do GH ~2,5-3h +
+# HORA_INICIO=12; sequência do dia: winbacks 8-9h, aniver 10h, cobrança 11h).
+#
+# Secrets: SUPABASE_KEY, UAZAPI_TOKEN_2000, UAZAPI_TOKEN_CEO
+
+name: Disparo Indica Território julho (WhatsApp)
+
+on:
+  schedule:
+    - cron: "7 12 * * 1-6"   # 09:07 BRT; atraso do GH + HORA_INICIO=12 => envio ~12h
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "1 = só listar, sem enviar"
+        required: false
+        default: ""
+      max_por_run:
+        description: "limite de envios neste run (padrão 20)"
+        required: false
+        default: ""
+      test_to:
+        description: "5516... = envia 1 exemplo só pra esse número"
+        required: false
+        default: ""
+      hora_inicio:
+        description: "hora BRT mínima pra começar (padrão 12)"
+        required: false
+        default: ""
+      jitter_max_min:
+        description: "jitter máximo de início em minutos (padrão 40)"
+        required: false
+        default: ""
+
+concurrency:
+  group: disparo-indicacao
+  cancel-in-progress: false
+
+jobs:
+  disparo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: pip install requests
+
+      - name: Disparar campanha de indicação
+        env:
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          UAZAPI_TOKEN_2000: ${{ secrets.UAZAPI_TOKEN_2000 }}
+          UAZAPI_TOKEN_CEO: ${{ secrets.UAZAPI_TOKEN_CEO }}
+          HORA_INICIO: ${{ github.event.inputs.hora_inicio || '12' }}
+          JITTER_MAX_MIN: ${{ github.event.inputs.jitter_max_min || '40' }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          MAX_POR_RUN: ${{ github.event.inputs.max_por_run || '20' }}
+          TEST_TO: ${{ github.event.inputs.test_to }}
+        run: python disparo_indicacao.py
