@@ -195,6 +195,7 @@ def main() -> int:
         if not fone:
             sem_fone.append(f"{nome} ({v['data_venda']})")
             continue
+        lead_id = rl[0].get("id")
         status = (rl[0].get("status") or "").lower()
         if status not in ("cliente", "inadimplente"):
             # matriculou em julho mas já não é aluno ativo — não convida
@@ -232,7 +233,7 @@ def main() -> int:
             f"{nome.title()} — convite do programa de indicação (aluno novo "
             "de julho/26, 1 mês grátis por amigo) pelo Whats 2000",
             {"disparo_key": disparo_key, "codigo_contrato": contrato,
-             "campanha": CAMPANHA})
+             "campanha": CAMPANHA, "lead_id": lead_id})
 
         # anti-bloqueio: 90-150s entre mensagens
         time.sleep(90 + random.uniform(0, 60))
