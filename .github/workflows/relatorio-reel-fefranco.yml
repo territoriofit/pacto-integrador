@@ -1,0 +1,37 @@
+# One-shot 07/08/2026: relatório de entrega do reel Fê Franco no WhatsApp
+# do André (~9h30-10h BRT). Guarda de data no script — fora de 07/08/2026
+# sai limpo, então o cron anual do Actions não dispara em 2027.
+# Secrets: SUPABASE_KEY, UAZAPI_TOKEN_CEO
+
+name: Relatório reel Fê Franco (one-shot 07/08)
+
+on:
+  schedule:
+    - cron: "0 10 7 8 *"   # 07:00 BRT em 07/08 + atraso do GH ~2,5-3h => ~9h30-10h
+  workflow_dispatch:
+    inputs:
+      force_date:
+        description: "1 = ignora a guarda de data"
+        required: false
+        default: ""
+
+jobs:
+  relatorio:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: pip install requests
+
+      - name: Enviar relatório
+        env:
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          UAZAPI_TOKEN_CEO: ${{ secrets.UAZAPI_TOKEN_CEO }}
+          FORCE_DATE: ${{ github.event.inputs.force_date }}
+        run: python relatorio_reel_fefranco.py
