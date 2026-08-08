@@ -1,0 +1,48 @@
+# Aviso WhatsApp dos stories de grade programados (Business Suite)
+#
+# Roda nos horarios em que os stories programados vao ao ar e avisa o
+# Andre no WhatsApp (instancia Ceo). Perto do fim da leva mensal, lembra
+# de programar o mes seguinte; depois do fim, cobra ate a leva nova.
+# Calendario da leva fica em avisar_story.py (atualizar a cada leva).
+#
+# Horarios (BRT): dom 18h e seg-qui 21h  ->  cron em UTC (+3h).
+# GH Actions costuma atrasar alguns minutos.
+#
+# Secrets: UAZAPI_TOKEN_CEO
+
+name: Aviso story da grade (WhatsApp)
+
+on:
+  schedule:
+    - cron: "10 21 * * 0"    # dom 21:10 UTC = dom 18:10 BRT
+    - cron: "10 0 * * 2-5"   # ter-sex 00:10 UTC = seg-qui 21:10 BRT
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "1 = so imprimir, sem mandar WhatsApp"
+        required: false
+        default: ""
+
+concurrency:
+  group: avisar-story
+  cancel-in-progress: false
+
+jobs:
+  avisar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: pip install requests
+
+      - name: Avisar story
+        env:
+          UAZAPI_TOKEN_CEO: ${{ secrets.UAZAPI_TOKEN_CEO }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: python avisar_story.py
