@@ -2586,9 +2586,20 @@ class CRMClient:
                 ignore_duplicates=True,
             ).execute()
 
+        # 6.5 backstop via historico-contato: visita de codigo ANTIGO cuja meta
+        #     HO fechou sem venda some da fase HO e escapa dos passos 5 e 6 —
+        #     mas o contato de boas-vindas fica no historico para sempre.
+        #     Varre as ultimas paginas (mais recentes) e insere o que faltar.
+        extras_hist = self._bv_backstop_historico(adm, ini, agora)
+
         # 7. auditoria contra o BI oficial "Conversao de Vendas" do ADM
         #    (referencia definida pelo usuario em 2026-07-08): boletinVisitaMes
         #    e o total de BVs do mes — divergencia vira WARNING no log.
+        #    ATENCAO (investigacao 2026-08-14): o BI conta BOLETINS (eventos) e
+        #    esta tabela conta CLIENTES distintos por mes. Boletim pode ser
+        #    lancado retroativo (BI saltou 126->153 em 1,5 dia com 11 visitas
+        #    novas) e duplicado pro mesmo cliente — divergencia pequena e
+        #    esperada; so investigar se crescer ou se tabela < BI por muito.
         bi_mes = None
         try:
             bi = adm._gw("POST", "/v2-conversao-venda",
@@ -2607,11 +2618,94 @@ class CRMClient:
         log.info(f"sync_visitantes_bv: {len(vistos)} na janela, "
                  f"{len(novos)} novos, {len(convertidos) + extra} conversoes, "
                  f"{len(recuperados)} recuperados fora da HO, "
+                 f"{extras_hist} do historico, "
                  f"mes {tabela_mes} x BI {bi_mes}")
         return {"visitantes": len(vistos), "novos": len(novos),
                 "convertidos": len(convertidos) + extra,
                 "recuperados_fora_ho": len(recuperados),
+                "recuperados_historico": extras_hist,
                 "tabela_mes": tabela_mes, "bi_boletim_mes": bi_mes}
+
+    def _bv_backstop_historico(self, adm: "PactoADMClient", ini: date,
+                               agora: str, max_paginas: int = 12) -> int:
+        """
+        Insere em visitantes_bv contatos HO do historico que nao viraram linha.
+        O historico e paginado do mais antigo pro mais novo; anda de tras pra
+        frente ate sair da janela (ou esgotar max_paginas). data_visita = dia
+        do contato - 1 (mesma convencao do dataMeta da fase HO).
+        """
+        try:
+            r = adm.historico_contato(page=0, size=1)
+            total = r.get("totalElements") or 0
+            if not total:
+                return 0
+            candidatos: dict[tuple, dict] = {}
+            page = total // 100
+            piso = ini.isoformat()
+            for _ in range(max_paginas):
+                if page < 0:
+                    break
+                time.sleep(1.1)  # rate limit do gateway: 1 req/s por endpoint
+                c = adm.historico_contato(page=page, size=100).get("content") or []
+                page -= 1
+                if not c:
+                    continue
+                for x in c:
+                    cli = x.get("cliente") or {}
+                    if x.get("fase") != "HO" or not cli.get("codigo"):
+                        continue
+                    dia = (x.get("dia") or "")[:10]
+                    if dia < piso:
+                        continue
+                    dv = (date.fromisoformat(dia) - timedelta(days=1)).isoformat()
+                    chave = (int(cli["codigo"]), dv[:7])
+                    if chave not in candidatos:
+                        candidatos[chave] = {
+                            "nome":       cli.get("nome"),
+                            "matricula":  cli.get("matricula"),
+                            "consultor":  (x.get("responsavelCadastro") or {}).get("nomeApresentar"),
+                            "data_visita": dv,
+                        }
+                if min((x.get("dia") or "9999")[:10] for x in c) < piso:
+                    break
+            if not candidatos:
+                return 0
+            meses = sorted({m for _, m in candidatos})
+            r = self.sb.table("visitantes_bv").select(
+                "codigo_cliente,mes_referencia").in_("mes_referencia", meses).execute()
+            ja_tem = {(int(x["codigo_cliente"]), x["mes_referencia"]) for x in (r.data or [])}
+            faltam = {k: v for k, v in candidatos.items() if k not in ja_tem}
+            if not faltam:
+                return 0
+            linhas = []
+            for (cod, mes), v in faltam.items():
+                rl = self.sb.table("leads").select("id,status,name").eq(
+                    "id", _pacto_lead_id(cod, self.tenant_id)).execute()
+                lead = (rl.data or [None])[0]
+                status = (lead or {}).get("status")
+                convertido = status in ("cliente", "inadimplente")
+                linhas.append({
+                    "tenant_id":      self.tenant_id,
+                    "lead_id":        (lead or {}).get("id"),
+                    "codigo_cliente": cod,
+                    "nome":           v["nome"] or (lead or {}).get("name") or f"Visitante {cod}",
+                    "matricula":      v["matricula"],
+                    "situacao":       "Ativo" if convertido else "Visitante",
+                    "tipo_bv":        "Rematricula" if status == "inativo" else "Matricula",
+                    "consultor":      self._canon_consultor(v["consultor"]),
+                    "data_visita":    v["data_visita"],
+                    "mes_referencia": mes,
+                    "convertido_em":  agora if convertido else None,
+                })
+                log.info(f"bv backstop historico: inserindo cod={cod} mes={mes} "
+                         f"nome={v['nome']!r}")
+            self.sb.table("visitantes_bv").upsert(
+                linhas, on_conflict="tenant_id,codigo_cliente,mes_referencia",
+                ignore_duplicates=True).execute()
+            return len(linhas)
+        except Exception as e:
+            log.warning(f"bv backstop historico falhou (nao-fatal): {e}")
+            return 0
 
     def sincronizar_leads(self, pacto: "PactoClient", adm: "PactoADMClient") -> dict:
         """Sync rápido de leads — rodar a cada hora."""
