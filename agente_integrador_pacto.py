@@ -2399,7 +2399,7 @@ class CRMClient:
         lids = {(_pacto_lead_id(c, self.tenant_id)): c for c in cods}
         todas = list(lids.keys())
         for i in range(0, len(todas), BATCH):
-            rr = self.sb.table("leads").select("id,status").in_("id", todas[i:i+BATCH]).execute()
+            rr = self.sb.table("leads").select("id,status,name").in_("id", todas[i:i+BATCH]).execute()
             for row in (rr.data or []):
                 lead_por_cod[lids[row["id"]]] = row
 
@@ -2434,7 +2434,8 @@ class CRMClient:
                     "tenant_id":      self.tenant_id,
                     "lead_id":        lead["id"] if lead else None,
                     "codigo_cliente": cod,
-                    "nome":           v["nome"],
+                    # Gym Pass/Wellhub as vezes chega sem nome na meta (coluna NOT NULL)
+                    "nome":           v["nome"] or (lead or {}).get("name") or f"Visitante {cod}",
                     "matricula":      v["matricula"],
                     "situacao":       "Ativo" if convertido else "Visitante",
                     "tipo_bv":        _tipo_bv(v),
@@ -2509,7 +2510,7 @@ class CRMClient:
                     continue
                 misses = 0
                 sit = ((c.get("situacao") or {}).get("codigo") or "").upper()
-                rl = self.sb.table("leads").select("id,status,created_at").eq(
+                rl = self.sb.table("leads").select("id,status,name,created_at").eq(
                     "id", _pacto_lead_id(cod, self.tenant_id)).execute()
                 lead = (rl.data or [None])[0]
                 dv = ((lead or {}).get("created_at") or date.today().isoformat())[:10]
@@ -2528,7 +2529,8 @@ class CRMClient:
                     "tenant_id":      self.tenant_id,
                     "lead_id":        (lead or {}).get("id"),
                     "codigo_cliente": cod,
-                    "nome":           ((c.get("pessoa") or {}).get("nome")),
+                    "nome":           ((c.get("pessoa") or {}).get("nome"))
+                                      or (lead or {}).get("name") or f"Visitante {cod}",
                     "matricula":      c.get("matricula"),
                     "situacao":       "Ativo" if convertido else "Visitante",
                     "tipo_bv":        "Rematricula" if (lead or {}).get("status") == "inativo" else "Matricula",
@@ -2566,7 +2568,8 @@ class CRMClient:
                 "tenant_id":      self.tenant_id,
                 "lead_id":        ((rl.data or [None])[0] or {}).get("id"),
                 "codigo_cliente": cod,
-                "nome":           v.get("nome_cliente"),
+                "nome":           v.get("nome_cliente")
+                                  or ((c.get("pessoa") or {}).get("nome")) or f"Visitante {cod}",
                 "matricula":      c.get("matricula"),
                 "situacao":       "Ativo",
                 "tipo_bv":        "Rematricula" if v.get("tipo") == "RE" else "Matricula",
