@@ -11,6 +11,9 @@
 #
 # Textos aprovados pelo Andre em 2026-08-03 (validados com test_to).
 # Roda TODO DIA (dias consecutivos fazem parte da cadencia da regua).
+# COBRANCA_DIRETA (18/08): codigos_cliente que entram na regua ja no dia
+# do vencimento, sem esperar recusa no cartao (texto "parcela em aberto").
+# 8883 = Alexandre Cintas Urbano.
 #
 # Secrets: SUPABASE_KEY, UAZAPI_TOKEN_2000, UAZAPI_TOKEN_CEO
 
@@ -66,4 +69,5 @@ jobs:
           MAX_POR_RUN: ${{ github.event.inputs.max_por_run || '30' }}
           TEST_TO: ${{ github.event.inputs.test_to }}
           MAX_DIAS_ATRASO: ${{ github.event.inputs.max_dias_atraso || '30' }}
+          COBRANCA_DIRETA: "8883"
         run: python disparo_cobranca.py

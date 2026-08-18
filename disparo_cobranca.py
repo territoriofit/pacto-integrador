@@ -26,7 +26,10 @@ Clara so pega contato novo).
 Env: SUPABASE_KEY, UAZAPI_TOKEN_2000.
 Opcional: MIN_TENTATIVAS=n (padrao 1) | MAX_DIAS_ATRASO=n (padrao 30) | HORA_INICIO=h (padrao 9) |
 DRY_RUN=1 (so lista) | TEST_TO=5516... (envia 1 exemplo do p1, sem gravar
-dedup) | MAX_POR_RUN=n (padrao 30).
+dedup) | MAX_POR_RUN=n (padrao 30) | COBRANCA_DIRETA=codigo_cliente,...
+(alunos que entram na regua ja no vencimento, sem esperar recusa no cartao,
+com texto de "parcela em aberto" — decisao Andre 18/08, caso Alexandre
+Urbano codigo 8883).
 """
 
 import os
@@ -61,6 +64,21 @@ MSGS = {
         "seu acesso continuar liberado na catraca, bora acertar hoje?\n\n"
         "É rapidinho: responde aqui que nossa consultora resolve com você "
         "em poucos minutos 😉"),
+}
+
+# Alunos da lista COBRANCA_DIRETA sem tentativa no cartao ainda: o tom
+# "operadora nao aprovou" nao se aplica — p1/p2 viram "parcela em aberto".
+# p3/p4 seguem os textos padrao (ja sao genericos).
+MSGS_DIRETA = {
+    1: ("Oi, {nome}, tudo bem? Aqui é da Território Fit 💛\n\n"
+        "Passando pra lembrar que a sua mensalidade de *R$ {valor}* venceu "
+        "e ainda está em aberto 😊\n\n"
+        "Se for mais fácil, dá pra acertar por *PIX* ou cartão — me responde "
+        "aqui que nossa consultora te ajuda na hora 💛"),
+    2: ("Oi, {nome}! Só lembrando: a sua mensalidade de *R$ {valor}* segue "
+        "em aberto 😕\n\n"
+        "Quer acertar por *PIX* agora mesmo? É só responder essa mensagem "
+        "que nossa consultora te manda a chave na hora 😉"),
 }
 
 
@@ -104,23 +122,47 @@ def aguardar_janela_comercial(hora_inicio: int) -> bool:
     return True
 
 
-def buscar_alvos(sb: dict, max_dias: int, min_tentativas: int) -> list[dict]:
-    """1 regua por aluno: parcela mais antiga com nr_tentativas>=min."""
+def buscar_alvos(sb: dict, max_dias: int, min_tentativas: int,
+                 direta_clientes: list[str]) -> list[dict]:
+    """1 regua por aluno: parcela mais antiga com nr_tentativas>=min.
+    Alunos em direta_clientes (codigo_cliente) entram ja no vencimento,
+    sem exigir tentativa no cartao."""
+    campos = ("lead_id,nome_aluno,codigo_cliente,parcela_codigo,valor,"
+              "data_vencimento,dias_atraso,nr_tentativas")
     r = requests.get(
         f"{SUPABASE_URL}/rest/v1/parcelas_atrasadas",
-        params={"select": "lead_id,nome_aluno,parcela_codigo,valor,"
-                          "data_vencimento,dias_atraso,nr_tentativas",
+        params={"select": campos,
                 "nr_tentativas": f"gte.{min_tentativas}",
                 "dias_atraso": f"lte.{max_dias}",
                 "order": "data_vencimento.asc",
                 "limit": "1000"},
         headers=sb, timeout=60)
     r.raise_for_status()
+    linhas = r.json()
+    if direta_clientes:
+        rd = requests.get(
+            f"{SUPABASE_URL}/rest/v1/parcelas_atrasadas",
+            params={"select": campos,
+                    "codigo_cliente": f"in.({','.join(direta_clientes)})",
+                    "dias_atraso": f"lte.{max_dias}",
+                    "order": "data_vencimento.asc",
+                    "limit": "100"},
+            headers=sb, timeout=60)
+        rd.raise_for_status()
+        extras = rd.json()
+        if extras:
+            print(f"[crm] cobranca direta: {len(extras)} parcela(s) de "
+                  f"{len(direta_clientes)} aluno(s) da lista")
+        linhas = sorted(linhas + extras,
+                        key=lambda p: p.get("data_vencimento") or "")
     por_lead: dict[str, dict] = {}
-    for p in r.json():
+    for p in linhas:
+        # texto "parcela em aberto" so quando ainda nao houve recusa
+        p["direta"] = (str(p.get("codigo_cliente")) in direta_clientes
+                       and not p.get("nr_tentativas"))
         por_lead.setdefault(p["lead_id"], p)  # 1a = mais antiga (order asc)
     print(f"[crm] {len(por_lead)} aluno(s) com parcela recusada "
-          f"{min_tentativas}x+ (atraso ate {max_dias}d)")
+          f"{min_tentativas}x+ (atraso ate {max_dias}d) ou em cobranca direta")
     return list(por_lead.values())
 
 
@@ -257,6 +299,11 @@ def main() -> int:
     hora_inicio = int(os.environ.get("HORA_INICIO", "9"))
     max_dias = int(os.environ.get("MAX_DIAS_ATRASO", "30"))
     min_tentativas = int(os.environ.get("MIN_TENTATIVAS", "1"))
+    # cobranca direta: entra na regua ja no vencimento, sem esperar recusa
+    # (padrao: Alexandre Cintas Urbano cod 8883 — pedido Andre 18/08)
+    direta_clientes = [c.strip() for c in
+                       os.environ.get("COBRANCA_DIRETA", "8883").split(",")
+                       if c.strip()]
     if not key or (not zap and not dry):
         print("Faltam envs SUPABASE_KEY / UAZAPI_TOKEN_2000")
         return 1
@@ -275,7 +322,7 @@ def main() -> int:
         time.sleep(atraso)
 
     sb = _sb_headers(key)
-    alvos = buscar_alvos(sb, max_dias, min_tentativas)
+    alvos = buscar_alvos(sb, max_dias, min_tentativas, direta_clientes)
     if not alvos:
         print("Nenhum alvo hoje.")
         return 0
@@ -329,13 +376,16 @@ def main() -> int:
             continue
 
         passo = ultimo + 1
-        texto = MSGS[passo].format(nome=_primeiro_nome(nome),
-                                   valor=_valor_br(a.get("valor")))
+        direta = bool(a.get("direta"))
+        modelo = MSGS_DIRETA.get(passo, MSGS[passo]) if direta else MSGS[passo]
+        texto = modelo.format(nome=_primeiro_nome(nome),
+                              valor=_valor_br(a.get("valor")))
         if dry:
             print(f"[DRY] p{passo} — {nome} ({fone}) "
                   f"R$ {_valor_br(a.get('valor'))} "
                   f"venc {a.get('data_vencimento')} "
-                  f"{a.get('dias_atraso')}d {a.get('nr_tentativas')}x")
+                  f"{a.get('dias_atraso')}d {a.get('nr_tentativas')}x"
+                  + (" [direta]" if direta else ""))
             enviados += 1
             continue
 
@@ -354,7 +404,8 @@ def main() -> int:
         enviados += 1
         rel_linha = (f"{nome.title()} (p{passo}, R$ "
                      f"{_valor_br(a.get('valor'))}, "
-                     f"{a.get('dias_atraso')}d)")
+                     f"{a.get('dias_atraso')}d"
+                     + (", direta no vencimento" if direta else "") + ")")
         if retomada:
             rel_retomados.append(rel_linha)
         else:
@@ -369,9 +420,12 @@ def main() -> int:
             json={"agent_slug": "crm-relacionamento",
                   "title": f"Cobranca amigavel p{passo}/4 enviada",
                   "detail": f"{nome.title()} — parcela R$ "
-                            f"{_valor_br(a.get('valor'))} recusada "
-                            f"{a.get('nr_tentativas')}x no cartao "
-                            f"(venc. {a.get('data_vencimento')}) "
+                            f"{_valor_br(a.get('valor'))} "
+                            + ("em aberto (cobranca direta no vencimento)"
+                               if direta else
+                               f"recusada {a.get('nr_tentativas')}x no "
+                               "cartao")
+                            + f" (venc. {a.get('data_vencimento')}) "
                             "pelo Whats 2000" +
                             (" — regua RETOMADA (consultora falou mas "
                              "cobranca sem acompanhamento)" if retomada
@@ -381,6 +435,7 @@ def main() -> int:
                                "campanha": "cobranca-regua",
                                "parcela_codigo": cod,
                                "passo": passo,
+                               "cobranca_direta": direta,
                                "retomada_sem_acompanhamento": retomada,
                                "lead_id": a["lead_id"]}},
             timeout=30)
