@@ -1634,7 +1634,7 @@ class CRMClient:
                  f"de {len(abertas)} abertas")
         return {"abertas": len(abertas), "renovadas": renovadas}
 
-    def sync_agendamentos_status(self) -> dict:
+    def sync_agendamentos_status(self, adm: "PactoADMClient | None" = None) -> dict:
         """
         Detecta matriculas lancadas no Pacto e marca 'fechou' na pagina de
         Agendamentos do CRM (tabela agendamentos).
@@ -1696,9 +1696,104 @@ class CRMClient:
             fechados += 1
             log.info(f"  fechou: {ag['nome']} ({ag['mes_referencia']})")
 
+        # 3. cruzamento por TELEFONE com visitantes_bv (pente fino 24/08/26:
+        #    dos 88 agendamentos de 30d, 31 visitas e 19 matriculas estavam no
+        #    Pacto e o CRM tinha 2 "veio" / 3 "fechou" — o nome do WhatsApp e
+        #    apelido e o lead do webhook nem sempre funde com o lead Pacto).
+        #    Visita registrada no BV -> veio=true; visitante Ativo -> fechou=true.
+        vieram = fechados_bv = 0
+        if adm is not None:
+            try:
+                vieram, fechados_bv = self._cruzar_agendamentos_bv(adm)
+            except Exception as e:
+                log.warning(f"cruzamento agendamentos x BV falhou (nao-fatal): {e}")
+
         log.info(f"sync_agendamentos_status: {fechados} fechamentos, "
-                 f"{vinculados} vinculos novos, {len(abertos)} abertos")
-        return {"abertos": len(abertos), "vinculados": vinculados, "fechados": fechados}
+                 f"{vinculados} vinculos novos, {len(abertos)} abertos, "
+                 f"BV por telefone: {vieram} vieram / {fechados_bv} fecharam")
+        return {"abertos": len(abertos), "vinculados": vinculados,
+                "fechados": fechados + fechados_bv, "vieram_bv": vieram,
+                "fechados_bv": fechados_bv}
+
+    def _cruzar_agendamentos_bv(self, adm: "PactoADMClient", dias: int = 60,
+                                max_lookups: int = 40) -> tuple[int, int]:
+        """
+        Cruza agendamentos (ultimos `dias`) com visitantes_bv pelo final do
+        telefone (8 digitos). O telefone do visitante vem de GET /v1/cliente/
+        {codigo} no gateway e fica CACHEADO em visitantes_bv.telefone ("-" =
+        sem telefone no Pacto). No maximo `max_lookups` consultas por run
+        (o frequente roda a cada 10 min; ~5 visitas novas/dia). So promove:
+        nunca desmarca veio/fechou.
+        """
+        ini = (date.today() - timedelta(days=dias)).isoformat()
+        bv = self.sb.table("visitantes_bv").select(
+            "id,codigo_cliente,nome,situacao,data_visita,consultor,telefone"
+        ).gte("data_visita", ini).execute().data or []
+
+        lookups = 0
+        for v in bv:
+            if v.get("telefone") or not v.get("codigo_cliente"):
+                continue
+            if lookups >= max_lookups:
+                break
+            lookups += 1
+            fone = None
+            for tent in range(3):
+                c = adm.cliente(v["codigo_cliente"])
+                if isinstance(c, dict) and not c.get("erro"):
+                    for t in ((c.get("pessoa") or {}).get("telefones") or []):
+                        d = "".join(ch for ch in str(t.get("numero") or "") if ch.isdigit())
+                        if len(d) >= 8:
+                            fone = d
+                            break
+                    break
+                time.sleep(1.5 * (tent + 1))   # gateway devolve vazio sob carga
+            v["telefone"] = fone or "-"
+            self.sb.table("visitantes_bv").update(
+                {"telefone": v["telefone"]}).eq("id", v["id"]).execute()
+
+        por_fone: dict[str, list] = {}
+        for v in bv:
+            t = v.get("telefone") or ""
+            if len(t) >= 8 and t != "-":
+                por_fone.setdefault(t[-8:], []).append(v)
+        if not por_fone:
+            return 0, 0
+
+        ags = self.sb.table("agendamentos").select(
+            "id,tenant_id,nome,telefone,data_agendamento,veio,fechou"
+        ).gte("data_contato", ini).or_(
+            "veio.not.is.true,fechou.not.is.true").execute().data or []
+
+        vieram = fech = 0
+        for ag in ags:
+            tel = "".join(ch for ch in (ag.get("telefone") or "") if ch.isdigit())
+            hits = por_fone.get(tel[-8:]) if len(tel) >= 8 else None
+            if not hits:
+                continue
+            ativo = any((h.get("situacao") or "").lower() == "ativo" for h in hits)
+            upd = {}
+            if not ag.get("veio"):
+                upd["veio"] = True
+            if ativo and not ag.get("fechou"):
+                upd["fechou"] = True
+            if not upd:
+                continue
+            self.sb.table("agendamentos").update(upd).eq("id", ag["id"]).execute()
+            h = sorted(hits, key=lambda x: x.get("data_visita") or "")[-1]
+            self.sb.table("agendamento_eventos").insert({
+                "tenant_id":      ag["tenant_id"],
+                "agendamento_id": ag["id"],
+                "tipo":           "auto",
+                "descricao":      (f"{'Matricula' if ativo else 'Visita'} detectada no Pacto "
+                                   f"pelo telefone (BV {h.get('data_visita')}, "
+                                   f"{h.get('nome')}, {h.get('consultor') or '-'})"),
+                "registrado_por": "Sync Pacto",
+            }).execute()
+            vieram += int("veio" in upd)
+            fech += int("fechou" in upd)
+            log.info(f"  BV: {ag['nome']} -> {upd}")
+        return vieram, fech
 
     def sync_leads_acompanhamento_status(self) -> dict:
         """
@@ -4018,7 +4113,7 @@ class CRMClient:
             # 'renovado' na pagina Renovacao quem lancou contrato novo no Pacto
             ("renovacoes_status",  lambda: self.sync_renovacoes_status()),
             # idem pra pagina Agendamentos: quem agendou aula e virou aluno
-            ("agendamentos_status", lambda: self.sync_agendamentos_status()),
+            ("agendamentos_status", lambda: self.sync_agendamentos_status(adm)),
             # e pra pagina Leads (acompanhamento)
             ("leads_acomp_status", lambda: self.sync_leads_acompanhamento_status()),
             # contratos lançados (matrícula/rematrícula/renovação) → Ranking
@@ -4092,7 +4187,7 @@ class CRMClient:
             # visitante que comprou vira aluno ativo na hora (kanban Alunos)
             ("promover_ativos",   lambda: self.promover_leads_ativos()),
             # páginas Agendamentos/Leads/Renovação enxergam o novo cliente
-            ("agendamentos_status", lambda: self.sync_agendamentos_status()),
+            ("agendamentos_status", lambda: self.sync_agendamentos_status(adm)),
             ("leads_acomp_status", lambda: self.sync_leads_acompanhamento_status()),
             ("renovacoes_status", lambda: self.sync_renovacoes_status()),
             # inadimplência intraday: relatório rápido (1-2 requests)
@@ -4503,7 +4598,7 @@ if __name__ == "__main__":
             r = _crm().sync_visitantes_bv(adm, dias=int(dias) if dias else 45)
             print(f"\nVisitantes BV: {r}")
         elif op == "47":
-            r = _crm().sync_agendamentos_status()
+            r = _crm().sync_agendamentos_status(adm)
             print(f"\nAgendamentos: {r['fechados']} fechamento(s) detectado(s), "
                   f"{r['vinculados']} vinculo(s) novo(s), {r['abertos']} aberto(s)")
         elif op == "48":
