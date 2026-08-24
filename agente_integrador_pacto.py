@@ -1737,6 +1737,7 @@ class CRMClient:
             if lookups >= max_lookups:
                 break
             lookups += 1
+            time.sleep(1.3)   # gateway: max 1 req/s por endpoint e 50/min
             fone = None
             for tent in range(3):
                 c = adm.cliente(v["codigo_cliente"])
