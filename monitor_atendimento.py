@@ -409,12 +409,13 @@ def main() -> int:
 
     # -- WhatsApp pro Andre ----------------------------------------------
     linhas = [f"🔎 *Monitor de Atendimento* — {agora:%H:%M}",
-              f"{len(novos)} caso(s) precisando de atencao:", ""]
+              f"Leonardo aqui. {len(novos)} caso(s) precisando de atencao:", ""]
     for i, a in enumerate(novos, 1):
         nome = nomes.get(a["lead_id"], "").title() if a["lead_id"] else ""
         prefixo = f"{i}) {nome} " if nome else f"{i}) "
         linhas.append(prefixo + a["texto"])
         linhas.append("")
+    linhas.append("— Leonardo · Território Fit Digital")
     resp = requests.post(
         f"{UAZAPI_URL}/send/text",
         headers={"token": zap, "Content-Type": "application/json"},

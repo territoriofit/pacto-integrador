@@ -121,7 +121,7 @@ def main():
             linhas.append(f"— {_primeiro_nome(nomes.get(lid))} ({tipo}, {_hora(m['sent_at'])}){marca}: \"{texto}\"")
     if not leads_ids:
         linhas += ["", "Nenhuma conversa assumida no período — ou tudo respondido a tempo, ou o cron parou (conferir)."]
-    linhas += ["", "Pra desligar: \"desliga o takeover\"."]
+    linhas += ["", "Pra desligar: \"desliga o takeover\".", "", "— Leonardo · Território Fit Digital"]
     texto = "\n".join(linhas)
     print(texto)
     if dry:
