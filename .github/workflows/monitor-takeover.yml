@@ -1,0 +1,44 @@
+# Relatorio diario do TAKEOVER da Clara (ela assume atendimentos parados e faz
+# follow-up) -> WhatsApp do Andre (instancia Ceo). Pedido do Andre 24/08/2026:
+# "faca o monitoramento amanha e me avise no whatsapp como esta rodando".
+# Roda todo dia ~8h BRT e ~13h BRT (o GH atrasa 1-3h, entao o cron e mais cedo).
+# Secrets: SUPABASE_KEY, UAZAPI_TOKEN_CEO
+
+name: Relatorio takeover da Clara (WhatsApp)
+
+on:
+  schedule:
+    - cron: "40 9 * * *"    # ~06:40-08:30 BRT
+    - cron: "40 14 * * *"   # ~11:40-13:30 BRT
+  workflow_dispatch:
+    inputs:
+      horas:
+        description: "janela em horas (padrao 24)"
+        required: false
+        default: ""
+      dry_run:
+        description: "1 = so imprimir, sem enviar"
+        required: false
+        default: ""
+
+concurrency:
+  group: monitor-takeover
+  cancel-in-progress: false
+
+jobs:
+  relatorio:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests
+      - name: Relatorio takeover
+        env:
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          UAZAPI_TOKEN_CEO: ${{ secrets.UAZAPI_TOKEN_CEO }}
+          HORAS: ${{ github.event.inputs.horas || '24' }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: python monitor_takeover.py
