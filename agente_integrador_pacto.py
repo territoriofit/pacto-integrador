@@ -1241,6 +1241,51 @@ class CRMClient:
         log.info(f"sync_alunos_ativos: {n}/{len(alunos)} ok")
         return n
 
+    def sync_fones_alunos_ativos(self, pacto: "PactoClient") -> int:
+        """
+        Telefones (8 últimos dígitos) de TODOS os alunos ATIVOS no Pacto -> tabela
+        pacto_alunos_ativos (substituição completa). Usada pela Clara (RPC
+        ai_agent_takeover_candidates) pra NUNCA fazer follow-up de vendas em quem
+        já se matriculou, mesmo que a matrícula seja de hoje (incidente 24/08/2026:
+        lead criado pela consultora no WhatsApp é outro registro, status 'lead').
+        ~20 requests de 1000 (30-40 s).
+        """
+        log.info("CRM sync: fones de alunos ativos (Pacto -> pacto_alunos_ativos)...")
+        rows, page = {}, 0
+        while True:
+            r = pacto._req("GET", "/psec/alunos", params={"size": 1000, "page": page})
+            content = r.get("content", []) if isinstance(r, dict) else (r or [])
+            if not content:
+                break
+            for a in content:
+                if a.get("situacaoAluno") != "ATIVO":
+                    continue
+                for f in a.get("fones") or []:
+                    num = f.get("numero") if isinstance(f, dict) else f
+                    d = "".join(c for c in str(num or "") if c.isdigit())
+                    if len(d) >= 8:
+                        rows[d[-8:]] = {
+                            "phone8": d[-8:], "nome": a.get("nome"),
+                            "matricula": str(a.get("matriculaZW") or a.get("id") or ""),
+                            "codigo_cliente": str(a.get("codigoCliente") or ""),
+                            "plano": a.get("planoZW") if isinstance(a.get("planoZW"), str) else None,
+                            "synced_at": datetime.now(dt_timezone.utc).isoformat(),
+                        }
+            page += 1
+            if page >= (r.get("totalPages", 1) if isinstance(r, dict) else 1):
+                break
+        if len(rows) < 100:
+            log.error(f"sync_fones_alunos_ativos: só {len(rows)} fones — abortando pra não esvaziar a tabela")
+            return 0
+        lista = list(rows.values())
+        for i in range(0, len(lista), 500):
+            self.sb.table("pacto_alunos_ativos").upsert(lista[i:i + 500]).execute()
+        # remove quem saiu (deixou de ser ativo): tudo que não foi tocado nesta rodada
+        corte = lista[0]["synced_at"]
+        self.sb.table("pacto_alunos_ativos").delete().lt("synced_at", corte).execute()
+        log.info(f"sync_fones_alunos_ativos: {len(lista)} fones ativos")
+        return len(lista)
+
     def sync_alunos_inativos(self, pacto: "PactoClient") -> int:
         """Upsert de todos os alunos inativos (ex-alunos) do Pacto como leads no CRM."""
         log.info("CRM sync: alunos inativos...")
@@ -3084,7 +3129,7 @@ class CRMClient:
                 "data_venda": dt.date().isoformat(),
                 "mes_referencia": dt.strftime("%Y-%m"),
                 "semana": min((dt.day + 6) // 7, 5),
-                "synced_at": datetime.now(timezone.utc).isoformat(),
+                "synced_at": datetime.now(dt_timezone.utc).isoformat(),
             }
 
         r = (self.sb.table("vendas_pacto").select("codigo_contrato")
@@ -4174,6 +4219,8 @@ class CRMClient:
         resultado = {}
         for nome, fn in [
             # passos do antigo sync horário
+            # fones dos alunos ATIVOS no Pacto — trava da Clara contra follow-up em aluno
+            ("fones_alunos_ativos", lambda: self.sync_fones_alunos_ativos(pacto)),
             ("visitantes_hoje",   lambda: self.sync_visitantes(adm)),
             ("meta_lead_ads",     lambda: self.sync_meta_lead_ads()),
             # contratos novos entram na hora (walker barato: ~10 requests)
