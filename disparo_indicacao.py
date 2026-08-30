@@ -66,7 +66,7 @@ def _sb_headers(key: str) -> dict:
 
 
 def _primeiro_nome(nome: str) -> str:
-    p = (nome or "").strip().split()
+    p = (nome or "").replace("Feff", "").strip().split()
     return p[0].title() if p else "tudo bem"
 
 
@@ -113,9 +113,9 @@ def _log_activity(sb: dict, title: str, detail: str, metadata: dict) -> None:
 
 
 def avisar_andre(texto: str) -> bool:
-    token = (os.environ.get("UAZAPI_TOKEN_CEO", "").strip()
-             or os.environ.get("UAZAPI_TOKEN_2000", "").strip())
-    para = os.environ.get("ALERTA_PARA", "5516992290338").strip()
+    token = (os.environ.get("UAZAPI_TOKEN_CEO", "").replace("Feff", "").strip()
+             or os.environ.get("UAZAPI_TOKEN_2000", "").replace("Feff", "").strip())
+    para = os.environ.get("ALERTA_PARA", "5516992290338").replace("Feff", "").strip()
     if not token:
         return False
     r = requests.post(
@@ -127,10 +127,10 @@ def avisar_andre(texto: str) -> bool:
 
 
 def main() -> int:
-    key = os.environ.get("SUPABASE_KEY", "").strip()
-    zap = os.environ.get("UAZAPI_TOKEN_2000", "").strip()
+    key = os.environ.get("SUPABASE_KEY", "").replace("Feff", "").strip()
+    zap = os.environ.get("UAZAPI_TOKEN_2000", "").replace("Feff", "").strip()
     dry = os.environ.get("DRY_RUN", "") == "1"
-    test_to = os.environ.get("TEST_TO", "").strip()
+    test_to = os.environ.get("TEST_TO", "").replace("Feff", "").strip()
     max_por_run = int(os.environ.get("MAX_POR_RUN", "20"))
     hora_inicio = int(os.environ.get("HORA_INICIO", "9"))
     jitter_max = int(os.environ.get("JITTER_MAX_MIN", "40"))

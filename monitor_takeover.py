@@ -35,17 +35,17 @@ def _hora(iso):
 
 
 def _primeiro_nome(nome):
-    n = (nome or "").strip()
+    n = (nome or "").replace("Feff", "").strip()
     if not n or n.startswith("(") or n[:2].isdigit() or n.startswith("55"):
         return "lead sem nome"
     return n.split()[0][:14]
 
 
 def main():
-    key = os.environ.get("SUPABASE_KEY", "").strip()
-    zap = os.environ.get("UAZAPI_TOKEN_CEO", "").strip()
+    key = os.environ.get("SUPABASE_KEY", "").replace("Feff", "").strip()
+    zap = os.environ.get("UAZAPI_TOKEN_CEO", "").replace("Feff", "").strip()
     horas = int(os.environ.get("HORAS", "24"))
-    destino = os.environ.get("ALERTA_PARA", "5516992290338").strip()
+    destino = os.environ.get("ALERTA_PARA", "5516992290338").replace("Feff", "").strip()
     dry = os.environ.get("DRY_RUN", "") == "1"
     if not key or (not zap and not dry):
         print("Faltam envs SUPABASE_KEY / UAZAPI_TOKEN_CEO")

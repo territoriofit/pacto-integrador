@@ -53,7 +53,7 @@ def _campanha():
     Retorna (tag, label, ini_ms, fim_ms). tag "abril26" mantem compat com
     os dedup keys ja gravados da 1a campanha.
     """
-    ref = os.environ.get("CAMPANHA_MES", "2026-04").strip()
+    ref = os.environ.get("CAMPANHA_MES", "2026-04").replace("Feff", "").strip()
     ano, mes = int(ref[:4]), int(ref[5:7])
     nome = MESES_PT[mes]
     tag = f"{nome}{ano % 100}"
@@ -83,14 +83,14 @@ def _sb_headers(key: str) -> dict:
 
 
 def _gw_headers() -> dict:
-    return {"Authorization": os.environ["PACTO_TOKEN"].strip(),
-            "chave": os.environ["PACTO_CHAVE"].strip(),
+    return {"Authorization": os.environ["PACTO_TOKEN"].replace("Feff", "").strip(),
+            "chave": os.environ["PACTO_CHAVE"].replace("Feff", "").strip(),
             "empresaId": "1", "Content-Type": "application/json",
             "Accept-Language": "pt-BR"}
 
 
 def _primeiro_nome(nome: str) -> str:
-    p = (nome or "").strip().split()
+    p = (nome or "").replace("Feff", "").strip().split()
     return p[0].title() if p else "tudo bem"
 
 
@@ -156,10 +156,10 @@ def telefone_cliente(codigo: int) -> str | None:
 
 
 def main() -> int:
-    key = os.environ.get("SUPABASE_KEY", "").strip()
-    zap = os.environ.get("UAZAPI_TOKEN_2000", "").strip()
+    key = os.environ.get("SUPABASE_KEY", "").replace("Feff", "").strip()
+    zap = os.environ.get("UAZAPI_TOKEN_2000", "").replace("Feff", "").strip()
     dry = os.environ.get("DRY_RUN", "") == "1"
-    test_to = os.environ.get("TEST_TO", "").strip()
+    test_to = os.environ.get("TEST_TO", "").replace("Feff", "").strip()
     max_por_run = int(os.environ.get("MAX_POR_RUN", "35"))
     hora_inicio = int(os.environ.get("HORA_INICIO", "9"))
     if not key or (not zap and not dry):

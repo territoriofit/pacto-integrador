@@ -113,10 +113,10 @@ _FECHAMENTOS = {
 def _fecha_conversa(content: str) -> bool:
     """Msg de encerramento (ok/obrigada/figurinha/so emoji) nao pede
     resposta — nao vira alerta de atendimento parado."""
-    t = (content or "").strip().lower()
+    t = (content or "").replace("Feff", "").strip().lower()
     if "[sticker]" in t or t.startswith("🏷️"):
         return True
-    limpo = "".join(c for c in t if c.isalnum() or c.isspace()).strip()
+    limpo = "".join(c for c in t if c.isalnum() or c.isspace()).replace("Feff", "").strip()
     return not limpo or limpo in _FECHAMENTOS
 
 
@@ -156,7 +156,7 @@ def _anthropic_key(sb: dict) -> str:
     try:
         rows = _get(sb, "config", {"select": "value",
                                    "key": "eq.ANTHROPIC_API_KEY", "limit": "1"})
-        return (rows[0].get("value") or "").strip() if rows else ""
+        return (rows[0].get("value") or "").replace("Feff", "").strip() if rows else ""
     except Exception as e:
         print(f"[ia] erro lendo ANTHROPIC_API_KEY: {e}")
         return ""
@@ -170,7 +170,7 @@ def conversa_precisa_resposta(anthropic_key: str, hist: list[dict]) -> bool:
     transcript = "\n".join(
         f"[{'Academia' if m['is_from_me'] else 'Cliente'}]: "
         f"{_trecho(m.get('content'), 200)}"
-        for m in hist[-6:] if (m.get("content") or "").strip())
+        for m in hist[-6:] if (m.get("content") or "").replace("Feff", "").strip())
     if not transcript:
         return True
     try:
@@ -189,7 +189,7 @@ def conversa_precisa_resposta(anthropic_key: str, hist: list[dict]) -> bool:
                 "retorno = SIM. Responda APENAS a palavra SIM ou NAO."),
             messages=[{"role": "user", "content": transcript}],
         )
-        veredito = (msg.content[0].text or "").strip().upper()
+        veredito = (msg.content[0].text or "").replace("Feff", "").strip().upper()
         return not veredito.startswith("NAO")
     except Exception as e:
         print(f"[ia] erro na análise ({e}) — mantendo alerta")
@@ -203,10 +203,10 @@ def _respondida(msgs_lead: list[dict], desde_iso: str) -> bool:
 
 
 def main() -> int:
-    key = os.environ.get("SUPABASE_KEY", "").strip()
-    zap = os.environ.get("UAZAPI_TOKEN_CEO", "").strip()
+    key = os.environ.get("SUPABASE_KEY", "").replace("Feff", "").strip()
+    zap = os.environ.get("UAZAPI_TOKEN_CEO", "").replace("Feff", "").strip()
     dry = os.environ.get("DRY_RUN", "") == "1"
-    destino = os.environ.get("ALERTA_PARA", "5516992290338").strip()
+    destino = os.environ.get("ALERTA_PARA", "5516992290338").replace("Feff", "").strip()
     limite_min = int(os.environ.get("LIMITE_MIN", "30"))
     cooldown_h = int(os.environ.get("ALERTA_COOLDOWN_H", "4"))
     if not key or (not zap and not dry):
@@ -419,7 +419,7 @@ def main() -> int:
     resp = requests.post(
         f"{UAZAPI_URL}/send/text",
         headers={"token": zap, "Content-Type": "application/json"},
-        json={"number": destino, "text": "\n".join(linhas).strip()},
+        json={"number": destino, "text": "\n".join(linhas).replace("Feff", "").strip()},
         timeout=120)
     print(f"[whats] alerta -> ...{destino[-4:]} HTTP {resp.status_code}")
 

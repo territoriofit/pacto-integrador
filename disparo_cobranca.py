@@ -88,7 +88,7 @@ def _sb_headers(key: str) -> dict:
 
 
 def _primeiro_nome(nome: str) -> str:
-    p = (nome or "").strip().split()
+    p = (nome or "").replace("Feff", "").strip().split()
     return p[0].title() if p else "tudo bem"
 
 
@@ -221,7 +221,7 @@ def _anthropic_key(sb: dict) -> str:
                                  "key": "eq.ANTHROPIC_API_KEY", "limit": "1"},
                          headers=sb, timeout=30)
         rows = r.json()
-        return (rows[0].get("value") or "").strip() if rows else ""
+        return (rows[0].get("value") or "").replace("Feff", "").strip() if rows else ""
     except Exception as e:
         print(f"[ia] erro lendo ANTHROPIC_API_KEY: {e}")
         return ""
@@ -248,7 +248,7 @@ def acompanhamento_ativo(akey: str, sb: dict, lead_id: str, valor: str) -> bool:
             f"[{'Academia' if m['is_from_me'] else 'Aluno'} "
             f"{(m.get('sent_at') or '')[:16]}]: "
             f"{' '.join((m.get('content') or '').split())[:200]}"
-            for m in hist if (m.get("content") or "").strip())
+            for m in hist if (m.get("content") or "").replace("Feff", "").strip())
         if not transcript:
             return False
         import anthropic
@@ -265,7 +265,7 @@ def acompanhamento_ativo(akey: str, sb: dict, lead_id: str, valor: str) -> bool:
                 "pagamento, assunto mudou ou aluno sumiu sem a equipe "
                 "insistir = NAO. Responda APENAS SIM ou NAO."),
             messages=[{"role": "user", "content": transcript}])
-        veredito = (msg.content[0].text or "").strip().upper()
+        veredito = (msg.content[0].text or "").replace("Feff", "").strip().upper()
         return not veredito.startswith("NAO")
     except Exception as e:
         print(f"[ia] erro na analise de acompanhamento ({e}) — mantendo pausa")
@@ -274,8 +274,8 @@ def acompanhamento_ativo(akey: str, sb: dict, lead_id: str, valor: str) -> bool:
 
 def _envia_relatorio_whats(linhas: list[str]) -> None:
     """Resumo do run pro WhatsApp pessoal do Andre (instancia Ceo)."""
-    token = os.environ.get("UAZAPI_TOKEN_CEO", "").strip()
-    destino = os.environ.get("RELATORIO_PARA", "5516992290338").strip()
+    token = os.environ.get("UAZAPI_TOKEN_CEO", "").replace("Feff", "").strip()
+    destino = os.environ.get("RELATORIO_PARA", "5516992290338").replace("Feff", "").strip()
     if not token:
         print("[relatorio] UAZAPI_TOKEN_CEO ausente — relatorio nao enviado")
         return
@@ -283,7 +283,7 @@ def _envia_relatorio_whats(linhas: list[str]) -> None:
         resp = requests.post(
             f"{UAZAPI_URL}/send/text",
             headers={"token": token, "Content-Type": "application/json"},
-            json={"number": destino, "text": "\n".join(linhas).strip()},
+            json={"number": destino, "text": "\n".join(linhas).replace("Feff", "").strip()},
             timeout=120)
         print(f"[relatorio] -> ...{destino[-4:]} HTTP {resp.status_code}")
     except Exception as e:
@@ -291,19 +291,19 @@ def _envia_relatorio_whats(linhas: list[str]) -> None:
 
 
 def main() -> int:
-    key = os.environ.get("SUPABASE_KEY", "").strip()
-    zap = os.environ.get("UAZAPI_TOKEN_2000", "").strip()
+    key = os.environ.get("SUPABASE_KEY", "").replace("Feff", "").strip()
+    zap = os.environ.get("UAZAPI_TOKEN_2000", "").replace("Feff", "").strip()
     dry = os.environ.get("DRY_RUN", "") == "1"
-    test_to = os.environ.get("TEST_TO", "").strip()
+    test_to = os.environ.get("TEST_TO", "").replace("Feff", "").strip()
     max_por_run = int(os.environ.get("MAX_POR_RUN", "30"))
     hora_inicio = int(os.environ.get("HORA_INICIO", "9"))
     max_dias = int(os.environ.get("MAX_DIAS_ATRASO", "30"))
     min_tentativas = int(os.environ.get("MIN_TENTATIVAS", "1"))
     # cobranca direta: entra na regua ja no vencimento, sem esperar recusa
     # (padrao: Alexandre Cintas Urbano cod 8883 — pedido Andre 18/08)
-    direta_clientes = [c.strip() for c in
+    direta_clientes = [c.replace("Feff", "").strip() for c in
                        os.environ.get("COBRANCA_DIRETA", "8883").split(",")
-                       if c.strip()]
+                       if c.replace("Feff", "").strip()]
     if not key or (not zap and not dry):
         print("Faltam envs SUPABASE_KEY / UAZAPI_TOKEN_2000")
         return 1

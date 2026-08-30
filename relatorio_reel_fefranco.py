@@ -31,14 +31,14 @@ def main() -> int:
         print(f"[guarda] hoje={hoje}, relatório é só de 2026-08-07 — saindo.")
         return 0
 
-    key = os.environ["SUPABASE_KEY"].strip()
+    key = os.environ["SUPABASE_KEY"].replace("Feff", "").strip()
     sb = {"apikey": key, "Authorization": f"Bearer {key}"}
     raw = requests.get(
         f"{SB}/rest/v1/config",
         params={"select": "value", "key": "eq.META_ADS_TOKEN_WRITE"},
         headers=sb, timeout=30).json()[0]["value"]
     token = (json.loads(raw)["value"]
-             if raw.lstrip().startswith("{") else raw.strip())
+             if raw.lstrip().startswith("{") else raw.replace("Feff", "").strip())
 
     linhas = []
     total_conv = 0
@@ -81,8 +81,8 @@ def main() -> int:
            "Qualquer ajuste (verba, criativo), é só chamar o agente de "
            "tráfego. 🧡")
 
-    tok = os.environ["UAZAPI_TOKEN_CEO"].strip()
-    para = os.environ.get("ALERTA_PARA", "5516992290338").strip()
+    tok = os.environ["UAZAPI_TOKEN_CEO"].replace("Feff", "").strip()
+    para = os.environ.get("ALERTA_PARA", "5516992290338").replace("Feff", "").strip()
     r = requests.post(
         f"{UAZAPI_URL}/send/text",
         headers={"token": tok, "Content-Type": "application/json"},

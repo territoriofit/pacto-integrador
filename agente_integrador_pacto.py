@@ -557,9 +557,19 @@ class PactoClient:
 
 # -- MÓDULO ADM / CRM (API Gateway) ------------------------------------------
 
-SUPABASE_URL   = os.getenv("SUPABASE_URL", "https://bmnyhaxvlifmwkcuglfh.supabase.co")
-SUPABASE_KEY   = os.getenv("SUPABASE_KEY")
-CRM_TENANT_ID  = os.getenv("CRM_TENANT_ID")
+def _env_limpo(nome, default=None):
+    """Lê variável de ambiente removendo BOM (﻿), aspas e espaços.
+    Incidente 26–30/08/2026: secret SUPABASE_KEY colado no GitHub com BOM
+    derrubou TODOS os syncs ('ascii' codec can't encode '﻿')."""
+    v = os.getenv(nome)
+    if v is None:
+        return default
+    v = v.replace("﻿", "").strip().strip('"').strip("'")
+    return v or default
+
+SUPABASE_URL   = _env_limpo("SUPABASE_URL", "https://bmnyhaxvlifmwkcuglfh.supabase.co")
+SUPABASE_KEY   = _env_limpo("SUPABASE_KEY")
+CRM_TENANT_ID  = _env_limpo("CRM_TENANT_ID")
 
 PACTO_GW_URL = "https://apigw.pactosolucoes.com.br"
 
