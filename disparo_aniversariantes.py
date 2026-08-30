@@ -60,7 +60,7 @@ def _sb_headers(key: str) -> dict:
 
 
 def _primeiro_nome(nome: str) -> str:
-    p = (nome or "").replace("Feff", "").strip().split()
+    p = (nome or "").replace("﻿", "").strip().split()
     return p[0].title() if p else "tudo bem"
 
 
@@ -133,10 +133,10 @@ def buscar_aniversariantes_inativos(sb: dict, meses_max: int) -> list[dict]:
 
 
 def main() -> int:
-    key = os.environ.get("SUPABASE_KEY", "").replace("Feff", "").strip()
-    zap = os.environ.get("UAZAPI_TOKEN_2000", "").replace("Feff", "").strip()
+    key = os.environ.get("SUPABASE_KEY", "").replace("﻿", "").strip()
+    zap = os.environ.get("UAZAPI_TOKEN_2000", "").replace("﻿", "").strip()
     dry = os.environ.get("DRY_RUN", "") == "1"
-    test_to = os.environ.get("TEST_TO", "").replace("Feff", "").strip()
+    test_to = os.environ.get("TEST_TO", "").replace("﻿", "").strip()
     max_por_run = int(os.environ.get("MAX_POR_RUN", "25"))
     hora_inicio = int(os.environ.get("HORA_INICIO", "9"))
     meses_max = int(os.environ.get("MESES_ULTIMO_ACESSO", "24"))
