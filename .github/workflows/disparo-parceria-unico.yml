@@ -1,0 +1,30 @@
+name: Convite parceria — envio unico na nuvem
+on:
+  schedule:
+    - cron: "7 9 9 9 *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "1 valida sem enviar; 0 executa somente na data autorizada"
+        default: "1"
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: convite-parceria-20260909
+  cancel-in-progress: false
+jobs:
+  campanha:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests==2.32.5
+      - name: Validar ou executar campanha privada
+        env:
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          DRY_RUN: ${{ github.event_name == 'schedule' && '0' || inputs.dry_run }}
+        run: python disparo_parceria_unico.py
