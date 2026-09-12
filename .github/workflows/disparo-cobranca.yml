@@ -70,4 +70,7 @@ jobs:
           TEST_TO: ${{ github.event.inputs.test_to }}
           MAX_DIAS_ATRASO: ${{ github.event.inputs.max_dias_atraso || '30' }}
           COBRANCA_DIRETA: "8883"
+          # Relatorio do run no WhatsApp do Andre (instancia Ceo). Variavel do repo
+          # RELATORIO_PARA=off pausa so o relatorio (a regua continua) — ops/pausar_ceo.sh
+          RELATORIO_PARA: ${{ vars.RELATORIO_PARA || '5516992290338' }}
         run: python disparo_cobranca.py

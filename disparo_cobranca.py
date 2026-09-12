@@ -279,6 +279,9 @@ def _envia_relatorio_whats(linhas: list[str]) -> None:
     if not token:
         print("[relatorio] UAZAPI_TOKEN_CEO ausente — relatorio nao enviado")
         return
+    if destino.lower() in ("off", "0", ""):
+        print("[relatorio] RELATORIO_PARA=off — relatorio pausado (pedido Andre 12/09)")
+        return
     try:
         resp = requests.post(
             f"{UAZAPI_URL}/send/text",
