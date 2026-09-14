@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Regua de cobranca: alunos com parcela recusada na 2a tentativa de cobranca
-no cartao (parcelas_atrasadas.nr_tentativas >= 1) recebem ate 4 mensagens
+no cartao (parcelas_atrasadas.nr_tentativas >= 1) recebem ate 7 mensagens
 amigaveis, 1 por dia, em dias consecutivos.
 
 Fluxo diario (GitHub Actions):
@@ -10,7 +10,7 @@ Fluxo diario (GitHub Actions):
      dispara ja na 1a recusa) e dias_atraso <= MAX_DIAS_ATRASO (padrao 30) —
      1 regua por aluno, ancorada na parcela mais antiga em aberto.
   2. Estado da regua em agent_activity (metadata.disparo_key =
-     "cobranca-<parcela_codigo>-p1..p4"): envia o proximo passo se o
+     "cobranca-<parcela_codigo>-p1..p7"): envia o proximo passo se o
      anterior foi em dia anterior (cadencia diaria).
   3. TRAVA DA CONSULTORA: a partir do p2, se houver mensagem HUMANA enviada
      ao aluno depois do p1 (consultora falou com ele — CRM grava sent_by
@@ -45,6 +45,8 @@ UAZAPI_URL = "https://territoriofit.uazapi.com"
 
 TZ_SP = timezone(timedelta(hours=-3))
 
+MAX_PASSOS = 7  # 4 -> 7 (pedido Andre 14/09/2026)
+
 MSGS = {
     1: ("Oi, {nome}, tudo bem? Aqui é da Território Fit 💛\n\n"
         "Tentamos processar a sua mensalidade de *R$ {valor}* no cartão e a "
@@ -64,11 +66,24 @@ MSGS = {
         "seu acesso continuar liberado na catraca, bora acertar hoje?\n\n"
         "É rapidinho: responde aqui que nossa consultora resolve com você "
         "em poucos minutos 😉"),
+    5: ("Oi, {nome}! Passando de novo porque a sua mensalidade de *R$ {valor}* "
+        "ainda consta em aberto por aqui 😕\n\n"
+        "Se você já acertou, me avisa que a gente confere. Se ainda não, "
+        "responde essa mensagem que nossa consultora te passa o *PIX* ou "
+        "atualiza o cartão em 1 minuto 💛"),
+    6: ("{nome}, a gente sente sua falta por aqui 💛\n\n"
+        "Sua mensalidade segue pendente e não queremos que isso te afaste "
+        "dos treinos. Tá passando por alguma dificuldade? Me conta que a "
+        "consultora encontra um jeito de resolver com você, sem burocracia 😊"),
+    7: ("Oi, {nome}! Essa é a última lembrança por aqui 💛\n\n"
+        "Sua mensalidade de *R$ {valor}* continua em aberto e, pra não travar "
+        "o seu acesso na catraca, o ideal é acertar hoje. Responde essa "
+        "mensagem que nossa consultora resolve com você em poucos minutos 😉"),
 }
 
 # Alunos da lista COBRANCA_DIRETA sem tentativa no cartao ainda: o tom
 # "operadora nao aprovou" nao se aplica — p1/p2 viram "parcela em aberto".
-# p3/p4 seguem os textos padrao (ja sao genericos).
+# p3 em diante seguem os textos padrao (ja sao genericos).
 MSGS_DIRETA = {
     1: ("Oi, {nome}, tudo bem? Aqui é da Território Fit 💛\n\n"
         "Passando pra lembrar que a sua mensalidade de *R$ {valor}* venceu "
@@ -349,7 +364,7 @@ def main() -> int:
         passos = estado.get(cod, {})
         ultimo = max(passos) if passos else 0
 
-        if ultimo >= 4:
+        if ultimo >= MAX_PASSOS:
             concluidos += 1
             continue
         if ultimo and passos[ultimo][:10] >= hoje:
@@ -421,7 +436,7 @@ def main() -> int:
             f"{SUPABASE_URL}/rest/v1/agent_activity",
             headers={**sb, "Prefer": "return=minimal"},
             json={"agent_slug": "crm-relacionamento",
-                  "title": f"Cobranca amigavel p{passo}/4 enviada",
+                  "title": f"Cobranca amigavel p{passo}/{MAX_PASSOS} enviada",
                   "detail": f"{nome.title()} — parcela R$ "
                             f"{_valor_br(a.get('valor'))} "
                             + ("em aberto (cobranca direta no vencimento)"
@@ -488,7 +503,7 @@ def main() -> int:
         if em_dia:
             extras.append(f"{em_dia} já receberam o passo de hoje")
         if concluidos:
-            extras.append(f"{concluidos} régua(s) concluída(s) (4 msgs)")
+            extras.append(f"{concluidos} régua(s) concluída(s) ({MAX_PASSOS} msgs)")
         if sem_fone:
             extras.append(f"sem telefone: {', '.join(sem_fone)}")
         if extras:
