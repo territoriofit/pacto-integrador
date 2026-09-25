@@ -1,0 +1,29 @@
+name: Acao HU 25/09 - disparo unico na nuvem
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "1 valida sem enviar; 0 executa (so na data da campanha, ate 20h BRT)"
+        default: "1"
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: disparo-hu-20260925
+  cancel-in-progress: false
+jobs:
+  campanha:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests==2.32.5
+      - name: Disparo (audiencia e texto ficam no CRM)
+        env:
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          CRM_TENANT_ID: ${{ secrets.CRM_TENANT_ID }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: python disparo_hu.py
