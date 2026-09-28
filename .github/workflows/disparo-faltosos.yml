@@ -1,0 +1,70 @@
+# Regua de faltosos — alunos ativos com 5, 10 e 15 dias sem vir
+#
+# Ate 3 mensagens de acolhimento por ciclo de ausencia (textos do Andre,
+# 28/09/2026). Depois de 15 dias a regua nao manda mais nada. Antes de cada
+# envio confere o ultimo acesso AO VIVO no Pacto (o sync roda de manha e grava
+# a data em UTC). Fora: quem esta na regua de cobranca, opt-out, quem ja esta
+# em conversa com a equipe e quem recebeu o mesmo passo nos ultimos 30 dias.
+# Envio dividido entre os numeros 91, Professores e 2000 (so os conectados no
+# CRM), 30 por numero por dia, 90-150s entre envios de cada numero, seg a sab.
+# DIAS_SEM_REGISTRO: dias em que a catraca ficou sem internet (26 e 27/09/2026).
+#
+# AGENDAMENTO DESLIGADO ate o Andre aprovar (so roda manual). Para ligar,
+# descomentar o bloco schedule abaixo.
+#
+# Secrets: SUPABASE_KEY e as PACTO_* do sync-diario (token de cada numero vem do CRM)
+
+name: Disparo regua de faltosos (WhatsApp)
+
+on:
+  # schedule:
+  #   - cron: "23 14 * * 1-6"   # 11:23 BRT; atraso do GH ~2,5-3h + HORA_INICIO=14 => envio ~14h (apos o sync-diario)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "1 = so listar, sem enviar"
+        required: false
+        default: "1"
+      max_por_instancia:
+        description: "limite de envios por numero neste run (padrao 30)"
+        required: false
+        default: ""
+      test_to:
+        description: "5516... = envia os 3 textos de exemplo so pra esse numero"
+        required: false
+        default: ""
+
+concurrency:
+  group: disparo-faltosos
+  cancel-in-progress: false
+
+jobs:
+  disparo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: pip install requests python-dotenv supabase openpyxl
+
+      - name: Disparar regua de faltosos
+        env:
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          CRM_TENANT_ID: ${{ secrets.CRM_TENANT_ID }}
+          PACTO_TOKEN: ${{ secrets.PACTO_TOKEN }}
+          PACTO_CHAVE: ${{ secrets.PACTO_CHAVE }}
+          PACTO_EMPRESA_ID: ${{ secrets.PACTO_EMPRESA_ID }}
+          PACTO_CTX: ${{ secrets.PACTO_CTX }}
+          PACTO_USER: ${{ secrets.PACTO_USER }}
+          PACTO_PWD: ${{ secrets.PACTO_PWD }}
+          HORA_INICIO: "14"
+          DIAS_SEM_REGISTRO: "2026-09-26,2026-09-27"
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          MAX_POR_INSTANCIA: ${{ github.event.inputs.max_por_instancia || '30' }}
+          TEST_TO: ${{ github.event.inputs.test_to }}
+        run: python disparo_faltosos.py
