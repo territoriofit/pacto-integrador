@@ -1,0 +1,46 @@
+# Analise unica do Google Ads no WhatsApp do Andre em 05/10/2026
+#
+# Pedido do Andre em 28/09/2026: uma semana depois das mudancas no Google Ads
+# (anuncios voltaram pra home, grupo de marca antigo reativado, campanha de
+# marca nova pausada), mandar um resumo pelo numero "Ceo Territorio Digital".
+# O script so envia no dia 05/10/2026; fora dessa data nao faz nada.
+# Depois do envio este workflow pode ser removido.
+#
+# Secrets: SUPABASE_KEY, UAZAPI_TOKEN_CEO
+
+name: Relatorio Google Ads 05/10 (WhatsApp Andre)
+
+on:
+  schedule:
+    - cron: "13 9 5 10 *"   # 06:13 BRT de 05/10; com o atraso do GH chega ~9h
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "1 = so imprime o texto, sem enviar"
+        required: false
+        default: "1"
+
+concurrency:
+  group: relatorio-google-ads-0510
+  cancel-in-progress: false
+
+jobs:
+  relatorio:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: pip install requests
+
+      - name: Montar e enviar o resumo
+        env:
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          UAZAPI_TOKEN_CEO: ${{ secrets.UAZAPI_TOKEN_CEO }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: python relatorio_google_ads_0510.py
