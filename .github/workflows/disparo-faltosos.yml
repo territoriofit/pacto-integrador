@@ -33,6 +33,10 @@ on:
         description: "5516... = envia os 3 textos de exemplo so pra esse numero"
         required: false
         default: ""
+      dias_sem_registro:
+        description: "dias sem acesso gravado (AAAA-MM-DD,...); 'nenhum' ignora — use so em simulacao"
+        required: false
+        default: ""
 
 concurrency:
   group: disparo-faltosos
@@ -63,7 +67,7 @@ jobs:
           PACTO_USER: ${{ secrets.PACTO_USER }}
           PACTO_PWD: ${{ secrets.PACTO_PWD }}
           HORA_INICIO: "14"
-          DIAS_SEM_REGISTRO: "2026-09-26,2026-09-27"
+          DIAS_SEM_REGISTRO: ${{ github.event.inputs.dias_sem_registro || '2026-09-26,2026-09-27' }}
           DRY_RUN: ${{ github.event.inputs.dry_run }}
           MAX_POR_INSTANCIA: ${{ github.event.inputs.max_por_instancia || '30' }}
           TEST_TO: ${{ github.event.inputs.test_to }}
