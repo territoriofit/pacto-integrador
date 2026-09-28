@@ -1,0 +1,70 @@
+# Relatorio "por que perdemos vendas e agendamentos" — roda inteiro na nuvem
+#
+# Pedido do Andre em 28/09/2026: ler as conversas do inbox do CRM, apontar o
+# principal motivo das vendas perdidas e da perda de agendamento, e mandar o
+# PDF no WhatsApp dele pelo numero "Ceo Territorio Digital".
+#
+# Usa a API paga da Anthropic (chave na config do CRM). Modelo escolhido pelo
+# Andre: claude-opus-5. O script para de ler se o custo estimado passar de
+# TETO_USD. O repo e publico: o log so tem contagens e nenhum artefato e salvo.
+#
+# Secrets: SUPABASE_KEY, UAZAPI_TOKEN_CEO
+
+name: Relatorio vendas perdidas (WhatsApp Andre)
+
+on:
+  workflow_dispatch:
+    inputs:
+      so_teste_envio:
+        description: "1 = so manda um PDF de teste pelo numero do CEO"
+        required: false
+        default: ""
+      max_conversas:
+        description: "limite de conversas lidas (teste); vazio = todas"
+        required: false
+        default: ""
+      data_ini:
+        description: "inicio do periodo (AAAA-MM-DD)"
+        required: false
+        default: "2026-08-25"
+      data_fim:
+        description: "fim do periodo, exclusivo (AAAA-MM-DD)"
+        required: false
+        default: "2026-09-26"
+      dry_run:
+        description: "1 = gera o relatorio mas nao envia"
+        required: false
+        default: ""
+
+concurrency:
+  group: relatorio-vendas-perdidas
+  cancel-in-progress: false
+
+jobs:
+  relatorio:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: |
+          sudo apt-get install -y -q fonts-dejavu-core > /dev/null
+          pip install -q requests anthropic reportlab
+
+      - name: Analisar conversas e enviar o PDF
+        env:
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          UAZAPI_TOKEN_CEO: ${{ secrets.UAZAPI_TOKEN_CEO }}
+          SO_TESTE_ENVIO: ${{ github.event.inputs.so_teste_envio }}
+          MAX_CONVERSAS: ${{ github.event.inputs.max_conversas }}
+          DATA_INI: ${{ github.event.inputs.data_ini }}
+          DATA_FIM: ${{ github.event.inputs.data_fim }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          MODELO: claude-opus-5
+          TETO_USD: "25"
+        run: python relatorio_vendas_perdidas.py
