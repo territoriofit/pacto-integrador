@@ -83,7 +83,8 @@ def num(v: float) -> str:
 
 
 def montar(a: dict, d: dict, fim_depois: date) -> str:
-    linhas = ["*Google Ads: uma semana depois das mudanças de 28/09*", ""]
+    linhas = ["*Resumo dos anúncios, uma semana depois das mudanças de 28/09*",
+              "", "*Google Ads*"]
     linhas.append("Cliques no WhatsApp vindos de anúncio do Google, "
                   "pelo rastreio do nosso site:")
     linhas.append(f"• Antes (22 a 28/09, {a['dias']} dias): {a['cliques']} "
@@ -127,6 +128,118 @@ def montar(a: dict, d: dict, fim_depois: date) -> str:
     return "\n".join(linhas)
 
 
+# ---------------------------------------------------------------- Meta Ads
+# Pedido do Andre 28/09: alem do Google, acompanhar 2 anuncios em observacao
+# no Meta (reel Aulas Coletivas no Semelhante 1% e imagem "Chega de segunda"
+# no frio). So leitura: token META_ADS_TOKEN da tabela config do CRM.
+
+META_CONTA = "act_571830319971175"
+GRAPH = "https://graph.facebook.com/v21.0/"
+CONVERSA = "onsite_conversion.messaging_conversation_started_7d"
+SEMANA_BASE = {"conta": 13.80, "frio": 22.17, "remarketing": 8.84,
+               "semelhante": 14.76}  # custo por conversa de 21 a 27/09
+
+
+def _meta_token(key: str) -> str:
+    r = requests.get(f"{SUPABASE_URL}/rest/v1/config",
+                     params={"select": "value", "key": "eq.META_ADS_TOKEN"},
+                     headers={"apikey": key, "Authorization": f"Bearer {key}"},
+                     timeout=30)
+    r.raise_for_status()
+    return (r.json()[0]["value"] or "").strip()
+
+
+def _insights(tok: str, ini: date, fim: date, nivel: str) -> list[dict]:
+    import json
+    r = requests.get(
+        GRAPH + META_CONTA + "/insights",
+        params={"fields": "campaign_name,adset_name,ad_name,spend,actions",
+                "level": nivel, "limit": "300",
+                "time_range": json.dumps({"since": ini.isoformat(),
+                                          "until": fim.isoformat()}),
+                "access_token": tok}, timeout=60)
+    r.raise_for_status()
+    out = []
+    for row in r.json().get("data", []):
+        conv = 0
+        for a in row.get("actions") or []:
+            if a["action_type"] == CONVERSA:
+                conv = int(float(a["value"]))
+        out.append({"campanha": row.get("campaign_name") or "",
+                    "conjunto": row.get("adset_name") or "",
+                    "anuncio": row.get("ad_name") or "",
+                    "gasto": float(row.get("spend") or 0), "conv": conv})
+    return out
+
+
+def _reais(v: float) -> str:
+    return "R$ " + f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def _resultado(gasto: float, conv: int) -> str:
+    """Ex.: '4 conversas, R$ 23,48 por conversa' ou 'nenhuma conversa'."""
+    if not conv:
+        return "nenhuma conversa"
+    nome = "1 conversa" if conv == 1 else f"{conv} conversas"
+    return f"{nome}, {_reais(gasto / conv)} por conversa"
+
+
+def _frase(texto: str) -> str:
+    return texto[:1].upper() + texto[1:]
+
+
+def secao_meta(key: str, fim: date) -> list[str]:
+    tok = _meta_token(key)
+    ini = date(2026, 9, 28)
+    camp = _insights(tok, ini, fim, "campaign")
+    vendas = [c for c in camp if "vagas" not in c["campanha"].lower()]
+    g = sum(c["gasto"] for c in vendas)
+    n = sum(c["conv"] for c in vendas)
+    linhas = ["", f"*Meta Ads, de {ini:%d/%m} a {fim:%d/%m}*",
+              f"• Conta (sem Vagas): {_reais(g)}, {_resultado(g, n)}. "
+              f"Na semana anterior era {_reais(SEMANA_BASE['conta'])}."]
+    for chave, nome, ident in (("frio", "Público frio", "vendas"),
+                               ("remarketing", "Remarketing", "remarketing"),
+                               ("semelhante", "Semelhante 1%", "semelhante")):
+        sel = [c for c in camp if ident in c["campanha"].lower()]
+        gg = sum(c["gasto"] for c in sel)
+        nn = sum(c["conv"] for c in sel)
+        linhas.append(f"• {nome}: {_reais(gg)}, {_resultado(gg, nn)} "
+                      f"(era {_reais(SEMANA_BASE[chave])})")
+
+    linhas += ["", "Anúncios que ficaram em observação:"]
+    ads_total = _insights(tok, date(2026, 9, 23), fim, "ad")
+    reel = [a for a in ads_total if a["anuncio"].startswith("[LAL-COLETIVAS-REEL]")]
+    gr = sum(a["gasto"] for a in reel)
+    nr = sum(a["conv"] for a in reel)
+    if gr < 100:
+        dec = "ainda abaixo de R$ 100 de gasto, manter em observação"
+    elif nr and gr / nr <= 15:
+        dec = "dentro da régua, sugestão: manter"
+    else:
+        dec = "acima da régua, sugestão: pausar"
+    linhas.append(f"• Reel Aulas Coletivas no Semelhante: {_reais(gr)} desde "
+                  f"23/09, {_resultado(gr, nr)}. {_frase(dec)}.")
+
+    ads_14 = _insights(tok, date(2026, 9, 21), fim, "ad")
+    img = [a for a in ads_14 if a["anuncio"].startswith("[AE-A]")]
+    gi = sum(a["gasto"] for a in img)
+    ni = sum(a["conv"] for a in img)
+    if ni == 0 and gi >= 60:
+        dec = "sugestão: pausar"
+    elif ni and gi / ni <= 15:
+        dec = "voltou a converter, sugestão: manter"
+    elif ni:
+        dec = "convertendo caro, sugestão: observar mais uma semana"
+    else:
+        dec = "pouco gasto pra decidir, manter em observação"
+    linhas.append(f"• Imagem \"Chega de segunda eu começo\" no frio: {_reais(gi)} "
+                  f"desde 21/09, {_resultado(gi, ni)}. {_frase(dec)}.")
+    linhas += ["", "Nada foi alterado automaticamente no Meta. Se quiser "
+                   "aplicar alguma sugestão, é só me pedir no Claude."]
+    return linhas
+
+
 def main() -> int:
     key = os.environ.get("SUPABASE_KEY", "").replace("﻿", "").strip()
     token = os.environ.get("UAZAPI_TOKEN_CEO", "").replace("﻿", "").strip()
@@ -148,6 +261,12 @@ def main() -> int:
         fim_depois = DEPOIS_INICIO
     texto = montar(resumo(linhas, *ANTES),
                    resumo(linhas, DEPOIS_INICIO, fim_depois), fim_depois)
+    try:
+        texto += "\n" + "\n".join(secao_meta(key, fim_depois))
+    except Exception as e:  # o resumo do Google sai mesmo se o Meta falhar
+        print(f"[meta] falhou: {e}")
+        texto += ("\n\n*Meta Ads:* não consegui ler os números do Meta "
+                  "nesta execução.")
     print(texto)
     if dry:
         print("\n[DRY] nada enviado.")
