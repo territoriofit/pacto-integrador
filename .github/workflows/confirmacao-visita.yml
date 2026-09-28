@@ -36,7 +36,7 @@ on:
         required: false
         default: ""
       test_to:
-        description: "5516... = envia os 3 textos de exemplo so pra esse numero"
+        description: "andre = envia os 3 textos de exemplo so pro numero do Andre"
         required: false
         default: ""
 

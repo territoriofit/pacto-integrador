@@ -643,6 +643,8 @@ def main() -> int:
     dry = os.environ.get("DRY_RUN", "1") != "0"
     detalhe = os.environ.get("DETALHE", "") == "1"
     test_to = os.environ.get("TEST_TO", "").replace("﻿", "").strip()
+    if test_to.lower() == "andre":   # mesmo destino dos relatorios
+        test_to = "5516992290338"
     max_run = int(os.environ.get("MAX_POR_RUN") or "40")
     jitter_max = int(os.environ.get("JITTER_MAX_MIN") or "10")
     so_passos = [p.strip() for p in (os.environ.get("PASSOS") or "").split(",")
