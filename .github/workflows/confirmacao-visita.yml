@@ -10,17 +10,18 @@
 # Envio pelo numero da ultima conversa do lead, 90-150s entre envios do mesmo
 # numero. Log so com contagens (repo publico).
 #
-# AGENDAMENTO DESLIGADO: os textos aguardam aprovacao do Andre. Pra ligar,
-# descomentar o bloco schedule e trocar o DRY_RUN padrao do schedule pra "0".
+# AGENDAMENTO LIGADO em 28/09/2026 (textos aprovados e testados no WhatsApp
+# do Andre). Rodada manual continua em simulacao por padrao (dry_run=1). Para
+# pausar, comentar o bloco schedule abaixo.
 #
 # Secrets: SUPABASE_KEY, CRM_TENANT_ID e as PACTO_* do sync (presenca)
 
 name: Confirmacao de visita (WhatsApp)
 
 on:
-  # schedule:
-  #   - cron: "20 9 * * *"    # 06:20 BRT; atraso do GH 1-3h => rodada da manha ~9h (dia + faltou)
-  #   - cron: "20 17 * * *"   # 14:20 BRT; atraso do GH 1-3h => rodada da tarde, vespera a partir das 17h
+  schedule:
+    - cron: "20 9 * * *"    # 06:20 BRT; atraso do GH 1-3h => rodada da manha ~9h (dia + faltou)
+    - cron: "20 17 * * *"   # 14:20 BRT; atraso do GH 1-3h => rodada da tarde, vespera a partir das 17h
   workflow_dispatch:
     inputs:
       dry_run:
@@ -68,7 +69,7 @@ jobs:
           PACTO_CTX: ${{ secrets.PACTO_CTX }}
           PACTO_USER: ${{ secrets.PACTO_USER }}
           PACTO_PWD: ${{ secrets.PACTO_PWD }}
-          DRY_RUN: ${{ github.event.inputs.dry_run || '1' }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || '0' }}   # schedule envia; manual simula
           MODO: ${{ github.event.inputs.modo || 'auto' }}
           PASSOS: ${{ github.event.inputs.passos }}
           TEST_TO: ${{ github.event.inputs.test_to }}

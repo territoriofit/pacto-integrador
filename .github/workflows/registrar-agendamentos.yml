@@ -1,0 +1,56 @@
+# Registro automatico de agendamento — visitas combinadas na conversa que
+# ninguem lancou na aba Agendamentos do CRM
+#
+# Plano de acao das vendas perdidas (Andre, 28/09/2026; gravacao autorizada
+# por ele no mesmo dia). Le as conversas das ultimas 30h, so grava com certeza
+# alta e aceite claro do lead; nao sobrescreve horario ja lancado no mesmo
+# dia. Toda gravacao fica com a observacao "Registrado automaticamente" e
+# evento na linha. Roda antes das rodadas da confirmacao de visita.
+#
+# Usa a API paga da Anthropic (chave na config do CRM): ~US$ 0,30 por rodada,
+# teto TETO_USD. Repo publico: log so com contagens.
+#
+# Secrets: SUPABASE_KEY
+
+name: Registro automatico de agendamento
+
+on:
+  schedule:
+    - cron: "50 7 * * *"    # 04:50 BRT; com o atraso do GH roda de manha cedo
+    - cron: "50 15 * * *"   # 12:50 BRT; com o atraso do GH roda no meio da tarde
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "1 = so simular, sem gravar | 0 = gravar"
+        required: false
+        default: "1"
+      janela_horas:
+        description: "horas de conversa pra tras (padrao 30)"
+        required: false
+        default: ""
+
+concurrency:
+  group: registrar-agendamentos
+  cancel-in-progress: false
+
+jobs:
+  registrar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: pip install -q requests anthropic
+
+      - name: Ler conversas e registrar agendamentos
+        env:
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || '0' }}
+          JANELA_HORAS: ${{ github.event.inputs.janela_horas || '30' }}
+          TETO_USD: "3"
+        run: python registrar_agendamentos.py
