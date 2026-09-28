@@ -124,7 +124,8 @@ def quem(m):
 
 def extrair(key, ini, fim):
     leads = sb_todos(key, "leads", {
-        "select": "id,name,phone,status,source,tags,created_at",
+        "select": "id,name,phone,status,source,tags,created_at,"
+                  "camp:metadata->origem_whatsapp->>campanha_nome",
         "created_at": f"gte.{ini}T03:00:00Z",
         "and": f"(created_at.lt.{fim}T03:00:00Z)", "order": "created_at"})
     ids = [l["id"] for l in leads]
@@ -162,6 +163,8 @@ def montar_universo(leads, msgs, ag, ativos):
         txt = " ".join((m.get("content") or "") for m in rec).lower()
         if (any(t.startswith("CV") for t in (l["tags"] or []))
                 or any((a.get("aula") or "") == "Currículo" for a in ags.get(l["id"], []))
+                # anuncio de vagas de emprego: o lead so diz "quero mais informacoes"
+                or "vaga" in (l.get("camp") or "").lower()
                 or re.search(r"curr[ií]culo|vaga de|vaga para|vagas de emprego|est[aá]gio", txt)):
             fora["candidato a vaga"] += 1
             continue
@@ -370,6 +373,11 @@ def consolidar(univ, res):
             por_cons.append({"nome": nome, **sinais(sel),
                              "motivos": motivos(sel)[:3]})
 
+    # funil, origem e horario so com quem era venda: o que a leitura marcou como
+    # "nao e venda" (aluno, fornecedor, candidato que escapou do filtro) sai
+    nao_venda = {r["id"] for r in R if r["tipo"] != "venda"}
+    univ = [u for u in univ if u["id"] not in nao_venda]
+
     orig = defaultdict(lambda: Counter())
     for u in univ:
         orig[u["origem"]][u["desfecho"]] += 1
@@ -563,10 +571,11 @@ def gerar_pdf(c, s, ini, fim, lidas, esperadas):
               ["Agendou e não matriculou", f["AGENDOU_SEM_MATRICULA"],
                p1(pct(f["AGENDOU_SEM_MATRICULA"], c["total"]))],
               ["Matriculou", f["MATRICULOU"], p1(pct(f["MATRICULOU"], c["total"]))],
-              ["Total de leads com conversa", c["total"], "100%"]], [90, 45, 45]),
+              ["Total de leads de venda com conversa", c["total"], "100%"]], [90, 45, 45]),
           Spacer(1, 4),
           Paragraph("Das %d conversas perdidas, %d foram lidas por inteiro. %d não eram venda "
-                    "(aluno, fornecedor, engano), %d mostravam que a pessoa acabou se "
+                    "(aluno, fornecedor, engano) e já estão fora da tabela acima, %d "
+                    "mostravam que a pessoa acabou se "
                     "matriculando e %d ainda estavam em andamento. Restaram %d vendas "
                     "perdidas de fato, que são a base dos motivos abaixo."
                     % (esperadas, lidas, c["nao_venda"], c["matriculou_conversa"],

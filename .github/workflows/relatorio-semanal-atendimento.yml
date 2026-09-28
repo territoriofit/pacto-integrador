@@ -1,0 +1,65 @@
+# Analise semanal do atendimento — toda sexta no WhatsApp do Andre
+#
+# Pedido do Andre em 28/09/2026 (plano de acao das vendas perdidas): analise
+# da semana pelo numero "Ceo Territorio Digital", mostrando onde melhorar.
+# Indicadores fixos por consultora (preco sem o lead pedir, convite com dia e
+# hora, falta sem recontato, conversa sem retomada), comparados com a semana
+# anterior, mais a agenda da semana e os motivos das perdas.
+#
+# Usa a API paga da Anthropic (chave na config do CRM), modelo claude-opus-5:
+# cerca de US$ 2 a 3 por semana (a primeira vez le 2 semanas). O script para
+# de ler se passar de TETO_USD. Repo publico: o log so tem contagens e nenhum
+# artefato e salvo.
+#
+# Secrets: SUPABASE_KEY, UAZAPI_TOKEN_CEO
+
+name: Analise semanal do atendimento (WhatsApp Andre)
+
+on:
+  schedule:
+    - cron: "10 9 * * 5"   # sexta 06:10 BRT; com o atraso do GH chega ~8h-9h
+  workflow_dispatch:
+    inputs:
+      data_fim:
+        description: "fim da semana, exclusivo (AAAA-MM-DD); vazio = hoje"
+        required: false
+        default: ""
+      max_conversas:
+        description: "limite de conversas lidas (teste); vazio = todas"
+        required: false
+        default: ""
+      dry_run:
+        description: "1 = gera o relatorio mas nao envia"
+        required: false
+        default: ""
+
+concurrency:
+  group: relatorio-semanal-atendimento
+  cancel-in-progress: false
+
+jobs:
+  relatorio:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: |
+          sudo apt-get install -y -q fonts-dejavu-core > /dev/null
+          pip install -q requests anthropic reportlab
+
+      - name: Analisar a semana e enviar o PDF
+        env:
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          UAZAPI_TOKEN_CEO: ${{ secrets.UAZAPI_TOKEN_CEO }}
+          DATA_FIM: ${{ github.event.inputs.data_fim }}
+          MAX_CONVERSAS: ${{ github.event.inputs.max_conversas }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          MODELO: claude-opus-5
+          TETO_USD: "8"
+        run: python relatorio_semanal_atendimento.py

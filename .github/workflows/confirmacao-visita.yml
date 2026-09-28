@@ -1,0 +1,75 @@
+# Confirmacao de visita e aula experimental — reduz a falta de quem agendou
+#
+# Plano de acao das vendas perdidas (Andre, 28/09/2026). Fala com quem tem
+# visita ou aula experimental na aba Agendamentos do CRM:
+#   vespera (D-1, 17h-19h45)  lembra dia e hora e pede confirmacao
+#   dia     (D0, 9h-17h, pelo menos 2h antes)  "estamos te esperando"
+#   faltou  (D+1 de manha, seg a sab)  convite pra remarcar pra quem nao veio
+# A presenca vem do cadastro de visitantes do Pacto; a rodada da manha refaz
+# esse cruzamento antes de falar com quem faltou (--sync-presenca).
+# Envio pelo numero da ultima conversa do lead, 90-150s entre envios do mesmo
+# numero. Log so com contagens (repo publico).
+#
+# AGENDAMENTO DESLIGADO: os textos aguardam aprovacao do Andre. Pra ligar,
+# descomentar o bloco schedule e trocar o DRY_RUN padrao do schedule pra "0".
+#
+# Secrets: SUPABASE_KEY, CRM_TENANT_ID e as PACTO_* do sync (presenca)
+
+name: Confirmacao de visita (WhatsApp)
+
+on:
+  # schedule:
+  #   - cron: "20 9 * * *"    # 06:20 BRT; atraso do GH 1-3h => rodada da manha ~9h (dia + faltou)
+  #   - cron: "20 17 * * *"   # 14:20 BRT; atraso do GH 1-3h => rodada da tarde, vespera a partir das 17h
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "1 = so simular, sem enviar | 0 = enviar"
+        required: false
+        default: "1"
+      modo:
+        description: "manha | tarde | auto (pelo horario)"
+        required: false
+        default: "auto"
+      passos:
+        description: "vespera,dia,faltou (vazio = os do modo)"
+        required: false
+        default: ""
+      test_to:
+        description: "5516... = envia os 3 textos de exemplo so pra esse numero"
+        required: false
+        default: ""
+
+concurrency:
+  group: confirmacao-visita
+  cancel-in-progress: false
+
+jobs:
+  confirmacao:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: pip install -q requests anthropic python-dotenv supabase openpyxl
+
+      - name: Lembretes de visita
+        env:
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          CRM_TENANT_ID: ${{ secrets.CRM_TENANT_ID }}
+          PACTO_TOKEN: ${{ secrets.PACTO_TOKEN }}
+          PACTO_CHAVE: ${{ secrets.PACTO_CHAVE }}
+          PACTO_EMPRESA_ID: ${{ secrets.PACTO_EMPRESA_ID }}
+          PACTO_CTX: ${{ secrets.PACTO_CTX }}
+          PACTO_USER: ${{ secrets.PACTO_USER }}
+          PACTO_PWD: ${{ secrets.PACTO_PWD }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || '1' }}
+          MODO: ${{ github.event.inputs.modo || 'auto' }}
+          PASSOS: ${{ github.event.inputs.passos }}
+          TEST_TO: ${{ github.event.inputs.test_to }}
+        run: python confirmacao_visita.py --sync-presenca
