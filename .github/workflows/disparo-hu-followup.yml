@@ -1,0 +1,30 @@
+name: Acao HU 25/09 - follow-up unico na nuvem
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "1 valida sem enviar; 0 executa (seg a sab, 9h as 20h BRT)"
+        default: "1"
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: disparo-hu-20260925
+  cancel-in-progress: false
+jobs:
+  campanha:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests==2.32.5
+      - name: Follow-up (audiencia fica no CRM; so quem nao respondeu)
+        env:
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          CRM_TENANT_ID: ${{ secrets.CRM_TENANT_ID }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          FOLLOWUP_MSG_FILE: mensagens/hu_followup1.txt
+        run: python disparo_hu_followup.py
