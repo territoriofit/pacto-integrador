@@ -220,6 +220,7 @@ Regras de julgamento:
 - "em_andamento" vale quando a conversa ainda está viva nos 3 dias finais do período analisado.
 - "matriculou_pela_conversa" vale quando a conversa mostra que a pessoa acabou se matriculando.
 - "followups_apos_silencio" é o número de mensagens de retomada que a academia mandou depois que o lead parou de responder.
+- "convite_antes_do_preco" é verdadeiro quando, antes do primeiro preço (ou na mesma mensagem ou no mesmo bloco de mensagens seguidas), a academia ou a Clara já tinha tentado agendar: convidou para visita ou aula experimental, perguntou dia ou horário para a pessoa vir, ou aceitou o pedido de agendamento do lead avançando para marcar. Perguntar só "você já conhece a academia?" não é convite. Também é verdadeiro quando a conversa mostra que o lead já tinha visitado a academia ou sido atendido presencialmente antes de receber o preço. Se nenhum preço foi informado, use falso.
 - "evidencia": trecho curto e literal da conversa, de até 15 palavras, que sustenta o motivo. Prefira fala do lead. Não inclua nome nem telefone.
 - "oportunidade": uma frase curta dizendo o que poderia ter salvado a conversa, ou "nenhuma" se a perda era inevitável.
 - "consultora": primeiro nome da atendente humana principal, ou texto vazio se não houve."""
@@ -238,6 +239,7 @@ ESQUEMA = {
         "preco_informado": {"type": "boolean"},
         "preco_pedido_pelo_lead": {"type": "boolean"},
         "convite_com_dia_e_hora": {"type": "boolean"},
+        "convite_antes_do_preco": {"type": "boolean"},
         "followups_apos_silencio": {"type": "integer"},
         "ultima_mensagem_de": {"type": "string", "enum": ["lead", "equipe"]},
         "evidencia": {"type": "string"},
@@ -245,7 +247,8 @@ ESQUEMA = {
     },
     "required": ["tipo", "desfecho_real", "motivo_principal", "motivo_secundario",
                  "quem_atendeu", "consultora", "preco_informado", "preco_pedido_pelo_lead",
-                 "convite_com_dia_e_hora", "followups_apos_silencio", "ultima_mensagem_de",
+                 "convite_com_dia_e_hora", "convite_antes_do_preco",
+                 "followups_apos_silencio", "ultima_mensagem_de",
                  "evidencia", "oportunidade"],
     "additionalProperties": False,
 }
@@ -286,6 +289,8 @@ def chamar(client, sistema, usuario, esquema, max_tokens=4000):
         return None
     except anthropic.APIStatusError as e:
         print(f"[claude] erro {e.status_code}: {str(e.message)[:120]}")
+        if e.status_code >= 500:  # sobrecarga passageira: espera antes da nova tentativa
+            time.sleep(15)
         return None
     except anthropic.APIConnectionError:
         return None

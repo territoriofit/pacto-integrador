@@ -7,9 +7,10 @@ uma analise da semana e enviar no meu whats pelo Ceo Territorio mostrando onde
 podemos melhorar".
 
 O que sai:
-  - 4 indicadores fixos, por consultora e no total, comparados com a semana
-    anterior: preco enviado sem o lead pedir, convite com dia e hora, falta
-    sem recontato e conversa sem retomada depois do silencio;
+  - 6 indicadores fixos, por consultora e no total, comparados com a semana
+    anterior: preco enviado sem o lead pedir, preco enviado antes de qualquer
+    convite, convite com dia e hora, falta remarcada no mesmo dia, falta sem
+    recontato e conversa sem retomada depois do silencio;
   - agenda da semana: agendados, vieram, faltaram;
   - motivos das perdas da semana e o que fazer diferente (sintese).
 
@@ -72,6 +73,8 @@ Você recebe os indicadores da semana, os da semana anterior quando existem, e u
 - "melhorias": exatamente 3 pontos para a equipe trabalhar na semana seguinte, em ordem de impacto. Em cada um: o que mudar, por que (com o número da semana) e como fazer na prática, em uma ou duas frases.
 - "consultoras": para cada consultora listada, um ponto forte e um ponto a corrigir sustentados pelos números dela. Se a amostra dela for pequena, diga isso.
 
+Dois indicadores medem as metas combinadas com a equipe em outubro de 2026: "preco_antes_convite" é a parcela das conversas com preço em que o valor saiu antes de qualquer convite para visita (meta: abaixo de 20%); "falta_remarcada_mesmo_dia_pct" é a parcela das faltas em que uma atendente propôs nova data no próprio dia da visita (meta: todas). Quando vierem vazios, não comente.
+
 Regras da casa: a sequência de venda é visita, aula experimental e só então a consultora fecha; o convite deve vir com dia e hora; preço não é enviado por iniciativa da academia; não proponha desconto nem promoção nova. Não invente número. Não repita a mesma ideia em dois lugares."""
 
 
@@ -81,7 +84,55 @@ def periodo() -> tuple[date, date]:
     return fim - timedelta(days=7), fim
 
 
-def agenda(key: str, ini: date, fim: date) -> dict:
+SIS_REMARCA = """Você lê o trecho de uma conversa de WhatsApp entre uma academia (Território Fit) e uma pessoa que tinha visita ou aula experimental marcada e, pelo registro da recepção, não veio. O cabeçalho informa o dia e o horário da visita. As linhas começam com data e hora (horário de Brasília) e o remetente: LEAD é o cliente; CLARA é a assistente automática, que também envia os lembretes automáticos; "CONSULTORA <nome>" e EQUIPE são atendentes humanas.
+
+Diga o que aconteceu depois da falta:
+- "remarcou_no_mesmo_dia": no próprio dia da visita marcada, uma atendente humana propôs nova data, perguntou qual dia fica melhor para a pessoa vir ou aceitou uma nova data sugerida pelo lead. Vale também quando o lead avisou antes do horário que não viria e a atendente já propôs remarcar.
+- "remarcou_depois": uma atendente humana fez isso, mas só em dia posterior ao da visita.
+- "pessoa_veio": a conversa mostra que a pessoa compareceu à visita.
+- "nao_remarcou": nenhuma atendente humana propôs nova data. Perguntar só "não deu certo vir?" ou "desistiu?", mandar tabela de preço ou promoção, ou dizer "vamos nos falando" não é remarcar. Mensagem da CLARA não conta como atendente humana.
+Não invente: na dúvida entre remarcou e não remarcou, use "nao_remarcou"."""
+
+ESQ_REMARCA = {
+    "type": "object",
+    "properties": {"situacao": {"type": "string", "enum": [
+        "remarcou_no_mesmo_dia", "remarcou_depois", "pessoa_veio", "nao_remarcou"]}},
+    "required": ["situacao"],
+    "additionalProperties": False,
+}
+
+
+def remarcacao(key: str, client, a: dict, teto: float) -> str | None:
+    """O que a equipe fez depois de uma falta. None = nao deu para avaliar."""
+    dia = datetime.fromisoformat(a["data_agendamento"][:10]).replace(tzinfo=TZ_SP)
+    ate = dia + timedelta(days=4)
+    msgs = base.sb_get(key, "whatsapp_messages", {
+        "select": "is_from_me,content,message_type,created_at,sb:metadata->>sent_by",
+        "lead_id": f"eq.{a['lead_id']}", "group_id": "is.null",
+        "message_type": "neq.ai_tool_call",
+        "created_at": f"gte.{dia:%Y-%m-%d}T03:00:00Z",
+        "and": f"(created_at.lt.{ate:%Y-%m-%d}T03:00:00Z)",
+        "order": "created_at.asc", "limit": "120"})
+    if not any(m["is_from_me"] and m.get("sb") != "ai_agent" for m in msgs):
+        return "nao_remarcou"
+    if client is None or base.custo_usd() > teto:
+        return None
+    linhas = ["[%s] %s: %s" % (base.hora(m["created_at"]).strftime("%d/%m %H:%M"),
+                               base.quem(m),
+                               re.sub(r"\s+", " ", (m.get("content") or "").strip()
+                                      or "[%s]" % (m.get("message_type") or "mídia"))[:380])
+              for m in msgs]
+    cab = "VISITA MARCADA PARA %s, horário %s\n" % (
+        dia.strftime("%d/%m"), a.get("horario") or "não informado")
+    for _ in range(3):
+        r = base.chamar(client, SIS_REMARCA, cab + "\n".join(linhas), ESQ_REMARCA,
+                        max_tokens=1500)
+        if r:
+            return r["situacao"]
+    return None
+
+
+def agenda(key: str, ini: date, fim: date, client=None, teto: float = 0.0) -> dict:
     """Agendamentos com data dentro da semana: vieram, faltaram, recontato."""
     ags = base.sb_todos(key, "agendamentos", {
         "select": "id,lead_id,aula,consultor,data_agendamento,horario,veio,fechou",
@@ -90,10 +141,13 @@ def agenda(key: str, ini: date, fim: date) -> dict:
     ags = [a for a in ags if (a.get("aula") or "") not in ("Currículo", "Ligação")]
     faltas = [a for a in ags if not a.get("veio") and not a.get("fechou")]
     sem_recontato = 0
+    remarca = Counter()
     for a in faltas:
         if not a.get("lead_id"):
             sem_recontato += 1
+            remarca["nao_remarcou"] += 1
             continue
+        remarca[remarcacao(key, client, a, teto) or "sem_avaliacao"] += 1
         m = re.match(r"(\d{1,2})\D?(\d{2})?", a.get("horario") or "")
         h = min(int(m.group(1)), 23) if m else 12
         marco = datetime.fromisoformat(a["data_agendamento"]).replace(
@@ -109,8 +163,15 @@ def agenda(key: str, ini: date, fim: date) -> dict:
         nome = (a.get("consultor") or "Sem consultora").strip()
         por[nome][0] += 1
         por[nome][1] += int(bool(a.get("veio") or a.get("fechou")))
+    avaliadas = (remarca["remarcou_no_mesmo_dia"] + remarca["remarcou_depois"]
+                 + remarca["nao_remarcou"])
     return {"agendados": len(ags), "vieram": len(ags) - len(faltas),
             "faltaram": len(faltas), "faltas_sem_recontato": sem_recontato,
+            "faltas_avaliadas": avaliadas,
+            "faltas_remarcadas_mesmo_dia": remarca["remarcou_no_mesmo_dia"],
+            "faltas_remarcadas_depois": remarca["remarcou_depois"],
+            "faltas_nao_remarcadas": remarca["nao_remarcou"],
+            "faltas_conversa_mostra_que_veio": remarca["pessoa_veio"],
             "por_consultora": {k: v for k, v in por.items()}}
 
 
@@ -128,11 +189,16 @@ def indicadores(univ: list, res: dict, ag: dict) -> dict:
         n = len(sel)
         sil = [r for r in sel if r["ultima_mensagem_de"] == "equipe"
                and r["desfecho_real"] != "em_andamento"]
+        preco = [r for r in sel if r["preco_informado"]]
         return {
             "conversas": n,
+            "com_preco": len(preco),
             "preco_sem_pedir": round(base.pct(sum(
                 r["preco_informado"] and not r["preco_pedido_pelo_lead"]
                 for r in sel), n), 1),
+            "preco_antes_convite": (round(base.pct(sum(
+                not r.get("convite_antes_do_preco") for r in preco), len(preco)), 1)
+                if preco else None),
             "convite_dia_hora": round(base.pct(sum(
                 r["convite_com_dia_e_hora"] for r in sel), n), 1),
             "sem_retomada": round(base.pct(sum(
@@ -156,8 +222,14 @@ def indicadores(univ: list, res: dict, ag: dict) -> dict:
         "falta_pct": round(base.pct(ag["faltaram"], ag["agendados"]), 1),
         "falta_sem_recontato_pct": round(base.pct(
             ag["faltas_sem_recontato"], ag["faltaram"]), 1),
-        "agenda": {k: ag[k] for k in ("agendados", "vieram", "faltaram",
-                                      "faltas_sem_recontato")},
+        "falta_remarcada_mesmo_dia_pct": (round(base.pct(
+            ag["faltas_remarcadas_mesmo_dia"], ag["faltas_avaliadas"]), 1)
+            if ag["faltas_avaliadas"] else None),
+        "agenda": {k: ag[k] for k in (
+            "agendados", "vieram", "faltaram", "faltas_sem_recontato",
+            "faltas_avaliadas", "faltas_remarcadas_mesmo_dia",
+            "faltas_remarcadas_depois", "faltas_nao_remarcadas",
+            "faltas_conversa_mostra_que_veio")},
         "por_consultora": [{"nome": n, **sinais(s)} for n, s in
                            sorted(cons.items(), key=lambda x: -len(x[1]))
                            if len(s) >= 5],
@@ -178,7 +250,7 @@ def analisar(key: str, client, ini: date, fim: date, teto: float, maxc: int):
     res = base.classificar(client, alvo, teto)
     if alvo and len(res) < 0.5 * len(alvo):
         return None
-    return indicadores(univ, res, agenda(key, ini, fim))
+    return indicadores(univ, res, agenda(key, ini, fim, client, teto))
 
 
 def guardado(key: str, ini: date) -> dict | None:
@@ -216,7 +288,9 @@ def sintetizar(client, ind: dict, ant: dict | None) -> dict | None:
 
 LINHAS = [  # (chave, rotulo, quanto menor melhor)
     ("preco_sem_pedir", "Preço enviado sem o lead pedir", True),
+    ("preco_antes_convite", "Preço enviado antes de qualquer convite", True),
     ("convite_dia_hora", "Convite com dia e hora definidos", False),
+    ("falta_remarcada_mesmo_dia_pct", "Faltas remarcadas no mesmo dia", False),
     ("falta_sem_recontato_pct", "Faltas sem nenhum recontato", True),
     ("sem_retomada", "Conversas sem retomada depois do silêncio", True),
     ("sem_resposta_da_equipe", "Última mensagem do lead ficou sem resposta", True),
@@ -226,8 +300,8 @@ LINHAS = [  # (chave, rotulo, quanto menor melhor)
 ]
 
 
-def variacao(atual: float, antes, menor_melhor: bool) -> str:
-    if antes is None:
+def variacao(atual, antes, menor_melhor: bool) -> str:
+    if antes is None or atual is None:
         return "—"
     d = atual - antes
     if abs(d) < 1:
@@ -309,8 +383,8 @@ def gerar_pdf(ind: dict, ant: dict | None, s: dict | None,
     e += [KeepTogether([
               Paragraph("Indicadores da semana", H),
               tabela(["Indicador", "Semana", "Semana anterior", "Variação"],
-                     [[rot, p0(ind[k]), p0((ant or {}).get(k)),
-                       variacao(ind[k], (ant or {}).get(k), menor)]
+                     [[rot, p0(ind.get(k)), p0((ant or {}).get(k)),
+                       variacao(ind.get(k), (ant or {}).get(k), menor)]
                       for k, rot, menor in LINHAS], [80, 25, 30, 45])]),
           Spacer(1, 4),
           Paragraph("Base da semana: %d leads de venda com conversa; %d conversas de "
@@ -321,22 +395,32 @@ def gerar_pdf(ind: dict, ant: dict | None, s: dict | None,
     a = ind["agenda"]
     e.append(KeepTogether([
         Paragraph("Agenda da semana", H),
-        tabela(["Agendados", "Vieram", "Não vieram", "Faltas sem recontato"],
+        tabela(["Agendados", "Vieram", "Não vieram", "Remarcadas no mesmo dia",
+                "Remarcadas depois", "Sem nova data", "Sem recontato"],
                [[a["agendados"], a["vieram"], a["faltaram"],
-                 a["faltas_sem_recontato"]]], [45, 45, 45, 45]),
+                 a.get("faltas_remarcadas_mesmo_dia", "—"),
+                 a.get("faltas_remarcadas_depois", "—"),
+                 a.get("faltas_nao_remarcadas", "—"),
+                 a["faltas_sem_recontato"]]], [25, 22, 25, 30, 28, 25, 25]),
         Spacer(1, 4),
         Paragraph("A presença vem do cadastro de visitantes feito na recepção. "
-                  "Quem veio e não foi cadastrado aparece como falta.", P)]))
+                  "Quem veio e não foi cadastrado aparece como falta. Remarcada "
+                  "quer dizer que uma consultora propôs nova data; lembrete "
+                  "automático e mensagem da Clara não contam.%s" % (
+                      " Em %d faltas a conversa mostra que a pessoa veio e o "
+                      "cadastro não foi feito." % a["faltas_conversa_mostra_que_veio"]
+                      if a.get("faltas_conversa_mostra_que_veio") else ""), P)]))
 
     if ind["por_consultora"]:
         e.append(KeepTogether([
             Paragraph("Por consultora", H),
             tabela(["Consultora", "Conversas", "Preço sem pedir",
-                    "Convite com dia e hora", "Sem retomada"],
+                    "Preço antes do convite", "Convite com dia e hora",
+                    "Sem retomada"],
                    [[x["nome"], x["conversas"], p0(x["preco_sem_pedir"]),
-                     p0(x["convite_dia_hora"]),
+                     p0(x.get("preco_antes_convite")), p0(x["convite_dia_hora"]),
                      p0(x["sem_retomada"]) if x["silencio"] else "—"]
-                    for x in ind["por_consultora"]], [45, 30, 35, 40, 30])]))
+                    for x in ind["por_consultora"]], [38, 24, 28, 32, 32, 26])]))
         if s:
             for x in s["consultoras"]:
                 e.append(KeepTogether([
@@ -364,7 +448,11 @@ def gerar_pdf(ind: dict, ant: dict | None, s: dict | None,
     e += [Paragraph("Como ler", H),
           Paragraph("Os percentuais de preço, convite e retomada consideram as "
                     "conversas da semana de quem não matriculou, lidas por "
-                    "inteligência artificial. Como a semana é curta, parte das "
+                    "inteligência artificial. O preço antes do convite é medido só "
+                    "nas conversas em que algum valor foi informado, e não conta "
+                    "quem já tinha visitado a academia. As faltas remarcadas "
+                    "consideram todas as visitas marcadas para a semana. "
+                    "Como a semana é curta, parte das "
                     "conversas ainda está em andamento e os números de uma única "
                     "consultora podem variar bastante de uma semana pra outra. "
                     "Vale mais a tendência de várias semanas do que um número "
@@ -452,8 +540,12 @@ def main() -> int:
            "%d leads de venda, %.0f%% agendaram." % (ind["leads"], ind["agendou_pct"]),
            "Preço sem o lead pedir: %.0f%%. Convite com dia e hora: %.0f%%." % (
                ind["preco_sem_pedir"], ind["convite_dia_hora"]),
-           "Agenda: %d marcados, %d não vieram." % (
-               ind["agenda"]["agendados"], ind["agenda"]["faltaram"]),
+           "Preço antes de qualquer convite: %s das conversas com preço." % (
+               "%.0f%%" % ind["preco_antes_convite"]
+               if ind["preco_antes_convite"] is not None else "sem dados"),
+           "Agenda: %d marcados, %d não vieram, %d remarcados no mesmo dia." % (
+               ind["agenda"]["agendados"], ind["agenda"]["faltaram"],
+               ind["agenda"]["faltas_remarcadas_mesmo_dia"]),
            "Onde melhorar e números por consultora no PDF."]
     nome = "atendimento-semana-%s.pdf" % (fim - timedelta(days=1)).strftime("%d-%m")
     if not base.enviar_pdf(token, destino, pdf, nome, "\n".join(leg)):

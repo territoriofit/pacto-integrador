@@ -2,8 +2,9 @@
 #
 # Pedido do Andre em 28/09/2026 (plano de acao das vendas perdidas): analise
 # da semana pelo numero "Ceo Territorio Digital", mostrando onde melhorar.
-# Indicadores fixos por consultora (preco sem o lead pedir, convite com dia e
-# hora, falta sem recontato, conversa sem retomada), comparados com a semana
+# Indicadores fixos por consultora (preco sem o lead pedir, preco antes de
+# qualquer convite, convite com dia e hora, falta remarcada no mesmo dia,
+# falta sem recontato, conversa sem retomada), comparados com a semana
 # anterior, mais a agenda da semana e os motivos das perdas.
 #
 # Usa a API paga da Anthropic (chave na config do CRM), modelo claude-opus-5:
