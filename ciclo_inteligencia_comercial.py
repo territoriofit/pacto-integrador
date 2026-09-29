@@ -148,7 +148,7 @@ Você recebe: o funil do período com a confirmação na Pacto; comparações en
 
 Princípios obrigatórios:
 - O resultado que importa é matrícula confirmada na Pacto. Resposta e conversa são só intermediários.
-- Respeite o nível de evidência recebido. Nunca promova: "Hipótese" não vira "Sinal", "Sinal" não vira "Padrão". "Padrão validado" não existe neste ciclo, porque ainda não houve repetição em outro período.
+- Respeite o nível de evidência recebido. Nunca promova: "Hipótese" não vira "Sinal", "Sinal" não vira "Padrão". "Padrão validado" só vale quando o nível recebido disser isso, porque exige repetição em outro período.
 - Correlação não é causa. Quando uma diferença puder ser explicada pela origem do lead, pela intenção ou por quem já tinha visitado a academia, diga isso.
 - Não invente número. Use só os números recebidos e cite o tamanho da amostra junto.
 - Quando a amostra for pequena, diga que é pequena e não conclua.
@@ -161,7 +161,7 @@ O que escrever:
 - "melhor_desempenho" e "pior_desempenho": abordagens associadas a mais e a menos matrícula, com números.
 - "objecoes": o que os dados mostram sobre as objeções mais frequentes e o tratamento dado.
 - "rapport", "followup", "cta": um parágrafo cada, com números.
-- "recomendacoes_clara": SOMENTE para comparações com nível "Padrão". Se nenhuma tiver esse nível, devolva lista vazia. Cada recomendação traz aprendizado, quando utilizar, como aplicar, exemplo curto de mensagem, o que evitar, evidência, resultado e confiança.
+- "recomendacoes_clara": SOMENTE para comparações com nível "Padrão" ou "Padrão validado". Se nenhuma tiver esse nível, devolva lista vazia. Cada recomendação traz aprendizado, quando utilizar, como aplicar, exemplo curto de mensagem, o que evitar, evidência, resultado e confiança.
 - "testes": de 2 a 4 testes recomendados para as diferenças com nível "Sinal" ou "Hipótese" que valem ser confirmadas, cada um com hipótese, segmento, estratégia A, estratégia B, métrica e quantidade mínima de casos.
 - "rever": aprendizados anteriores que os dados deste ciclo mandam revisar, ou texto dizendo que nenhum.
 - "limitacoes": de 3 a 6 frases curtas sobre o que limita a leitura deste ciclo."""
@@ -601,9 +601,10 @@ def sintetizar(client, c):
     rnd = random.Random(7)
 
     def amostra(sel, n):
-        sel = [r for r in sel if len(r["aprendizado"]) > 15]
+        sel = [r for r in sel if len(r.get("aprendizado") or "") > 15]
         rnd.shuffle(sel)
-        return [{"aprendizado": r["aprendizado"][:200], "evidencia": r["evidencia"][:120],
+        return [{"aprendizado": r["aprendizado"][:200],
+                 "evidencia": (r.get("evidencia") or "")[:120],
                  "primeiro_pedido": r["primeiro_pedido"]} for r in sel[:n]]
 
     V = c["_V"]
@@ -626,7 +627,7 @@ def sintetizar(client, c):
             for h in r["hipoteses"]:
                 if h["codigo"] in mapa:
                     h["nivel"] = mapa[h["codigo"]]
-            if not any(v == "Padrão" for v in niveis.values()):
+            if not any(v.startswith("Padrão") for v in niveis.values()):
                 r["recomendacoes_clara"] = []
             return r
     return None
@@ -778,13 +779,15 @@ def gerar_pdf(c, s, ini, fim):
                     lc, [46, 52, 20, 18, 22, 22]))
 
     padroes = [x for x in c["comparacoes"] if x["nivel"] == "Padrão"]
+    validados = [x for x in c["comparacoes"] if x["nivel"] == "Padrão validado"]
     e.append(Paragraph("Padrões validados", H))
     e.append(Paragraph(
-        "Nenhum neste ciclo. É a primeira medição, e um padrão só é considerado validado "
-        "quando se repete em outro período. %s" % (
+        "%s Um padrão só é considerado validado quando se repete em leads de outro mês. %s" % (
+            "Validados: %s." % "; ".join(x["titulo"].lower() for x in validados) if validados
+            else "Nenhum até agora.",
             "As comparações que chegaram ao nível Padrão foram: %s." % "; ".join(
                 x["titulo"].lower() for x in padroes) if padroes
-            else "Nenhuma comparação chegou ao nível Padrão."), P))
+            else "Nenhuma outra comparação chegou ao nível Padrão."), P))
 
     if s:
         e.append(Paragraph("Hipóteses", H))
@@ -1003,7 +1006,7 @@ def main():
                                      "custo_usd": round(base.custo_usd(), 2)}},
                   timeout=30)
 
-    padroes = sum(1 for x in c["comparacoes"] if x["nivel"] == "Padrão")
+    padroes = sum(1 for x in c["comparacoes"] if x["nivel"].startswith("Padrão"))
     leg = ["*Inteligência comercial: o que leva à matrícula*",
            "Leads de %s a %s." % (date.fromisoformat(ini).strftime("%d/%m"),
                                   fim_d.strftime("%d/%m")),

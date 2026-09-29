@@ -276,13 +276,15 @@ def _conta(resp):
 def chamar(client, sistema, usuario, esquema, max_tokens=4000):
     """Uma chamada com saida JSON estruturada. Devolve dict ou None."""
     import anthropic
+    saida = {"format": {"type": "json_schema", "schema": esquema}}
+    if "haiku" not in MODELO:  # o Haiku nao aceita o parametro de esforco
+        saida["effort"] = "medium"
     try:
         resp = client.messages.create(
             model=MODELO, max_tokens=max_tokens,
             system=[{"type": "text", "text": sistema,
                      "cache_control": {"type": "ephemeral"}}],
-            output_config={"effort": "medium",
-                           "format": {"type": "json_schema", "schema": esquema}},
+            output_config=saida,
             messages=[{"role": "user", "content": usuario}])
     except anthropic.RateLimitError:
         time.sleep(30)

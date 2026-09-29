@@ -1,0 +1,73 @@
+# Leitura do agente de Inteligencia Comercial — continua de onde parou
+#
+# Pedido do Andre em 29/09/2026: depois do primeiro ciclo, o agente segue lendo
+# o que chega no CRM SEM reler tudo: conversa nova e lida inteira, conversa ja
+# lida recebe so as mensagens novas. O resultado na Pacto e conferido de novo
+# a cada rodada e as comparacoes sao recalculadas com a base acumulada.
+#
+# AGENDAMENTO DESLIGADO de proposito (29/09/2026): o Andre esta decidindo onde
+# isso roda por causa do custo da API. Por enquanto so roda quando disparado a
+# mao. Para ligar, descomentar o bloco "schedule" abaixo.
+#
+# Custo medido em 29/09: US$ 0,027 por conversa com claude-opus-5 e US$ 0,006
+# com claude-haiku-4-5 (que discordou do Opus nos campos de convite). O script
+# para de ler se passar de TETO_USD e deixa o resto para a rodada seguinte.
+#
+# Nao manda mensagem de rotina: o PDF so sai no dia 1, quando uma comparacao
+# sobe de nivel de evidencia, ou quando pedido (enviar = 1).
+#
+# Secrets: SUPABASE_KEY, UAZAPI_TOKEN_CEO
+
+name: Leitura continua de inteligencia comercial
+
+on:
+  # schedule:
+  #   - cron: "40 8 * * *"   # todo dia 05:40 BRT
+  workflow_dispatch:
+    inputs:
+      enviar:
+        description: "1 = manda o PDF no WhatsApp ao terminar"
+        required: false
+        default: ""
+      teto_usd:
+        description: "teto de gasto desta rodada em dolares"
+        required: false
+        default: "3"
+      modelo:
+        description: "modelo de leitura"
+        required: false
+        default: "claude-opus-5"
+      dry_run:
+        description: "1 = nao grava nem envia"
+        required: false
+        default: ""
+
+concurrency:
+  group: inteligencia-comercial-leitura
+  cancel-in-progress: false
+
+jobs:
+  leitura:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: |
+          sudo apt-get install -y -q fonts-dejavu-core > /dev/null
+          pip install -q requests anthropic reportlab
+
+      - name: Ler o que chegou e atualizar a base
+        env:
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          UAZAPI_TOKEN_CEO: ${{ secrets.UAZAPI_TOKEN_CEO }}
+          ENVIAR: ${{ github.event.inputs.enviar }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          MODELO: ${{ github.event.inputs.modelo || 'claude-opus-5' }}
+          TETO_USD: ${{ github.event.inputs.teto_usd || '3' }}
+        run: python leitura_diaria_inteligencia.py
