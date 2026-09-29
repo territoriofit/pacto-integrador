@@ -1,0 +1,71 @@
+# Ciclo do agente de Inteligencia Comercial — roda inteiro na nuvem
+#
+# Pedido do Andre em 29/09/2026: o ciclo de analise do agente precisa rodar sem
+# depender do PC dele e chegar em PDF no WhatsApp pelo numero "Ceo Territorio
+# Digital". Le as conversas do periodo (de quem matriculou e de quem nao
+# matriculou), confirma o resultado de cada lead na Pacto e compara as
+# abordagens de atendimento pela matricula real.
+#
+# Somente leitura no CRM e na Pacto. Nao envia mensagem a cliente e nao altera
+# a Clara: as recomendacoes saem como proposta para o Andre aprovar.
+#
+# Usa a API paga da Anthropic (chave na config do CRM), modelo claude-opus-5:
+# cerca de US$ 14 para um mes de leads (~500 conversas). O script para de ler
+# se passar de TETO_USD. Repo publico: o log so tem contagens e nenhum artefato
+# e salvo.
+#
+# Secrets: SUPABASE_KEY, UAZAPI_TOKEN_CEO
+
+name: Ciclo de inteligencia comercial (WhatsApp Andre)
+
+on:
+  workflow_dispatch:
+    inputs:
+      data_ini:
+        description: "inicio do periodo (AAAA-MM-DD)"
+        required: false
+        default: "2026-08-25"
+      data_fim:
+        description: "fim do periodo, exclusivo (AAAA-MM-DD)"
+        required: false
+        default: "2026-09-26"
+      max_conversas:
+        description: "limite de conversas lidas (teste); vazio = todas"
+        required: false
+        default: ""
+      dry_run:
+        description: "1 = gera o relatorio mas nao envia nem guarda"
+        required: false
+        default: ""
+
+concurrency:
+  group: ciclo-inteligencia-comercial
+  cancel-in-progress: false
+
+jobs:
+  ciclo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: |
+          sudo apt-get install -y -q fonts-dejavu-core > /dev/null
+          pip install -q requests anthropic reportlab
+
+      - name: Analisar as conversas e enviar o PDF
+        env:
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          UAZAPI_TOKEN_CEO: ${{ secrets.UAZAPI_TOKEN_CEO }}
+          DATA_INI: ${{ github.event.inputs.data_ini }}
+          DATA_FIM: ${{ github.event.inputs.data_fim }}
+          MAX_CONVERSAS: ${{ github.event.inputs.max_conversas }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          MODELO: claude-opus-5
+          TETO_USD: "20"
+        run: python ciclo_inteligencia_comercial.py
