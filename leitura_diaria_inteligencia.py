@@ -44,6 +44,7 @@ import ciclo_inteligencia_comercial as ciclo
 import relatorio_vendas_perdidas as base
 
 CAMPANHA = "leitura-diaria-inteligencia"
+ULTIMO = {}  # resumo da ultima execucao, para quem chama main() de outro script
 BALDE = ciclo.BALDE
 ESTADO, CONTROLE = "estado/leituras.json", "estado/controle.json"
 TZ_SP = base.TZ_SP
@@ -187,7 +188,7 @@ def ler(client, tarefas, teto):
                 return t[0], r
         return t[0], None
 
-    with ThreadPoolExecutor(max_workers=6) as ex:
+    with ThreadPoolExecutor(max_workers=int(os.environ.get("LEITORES") or "6")) as ex:
         for f in as_completed([ex.submit(uma, t) for t in tarefas]):
             i, r = f.result()
             if r:
@@ -203,7 +204,7 @@ def validar_entre_meses(linhas, res, qual, fim, c):
         meses[u["criado"].strftime("%Y-%m")].append(u)
     por_mes = {}
     for mes, sel in meses.items():
-        if len(sel) >= 60:
+        if len(sel) >= 200:  # so mes com volume de mes inteiro conta como outro periodo
             cm = ciclo.calcular(sel, res, qual, fim)
             por_mes[mes] = {x["chave"]: x for x in cm["comparacoes"]}
     for x in c["comparacoes"]:
@@ -300,6 +301,7 @@ def main():
                             "completa", len(validas)))
     # conversas com resposta do lead primeiro; o que passar do teto fica para amanha
     tarefas.sort(key=lambda t: (t[3] != "completa", -t[4]))
+    cortadas = [t[0] for t in tarefas[maxc:]] if maxc else []
     if maxc:
         tarefas = tarefas[:maxc]
     print(f"[leitura] a ler: {len(tarefas)} ({dict(Counter(t[3] for t in tarefas))}) | "
@@ -330,7 +332,8 @@ def main():
         return 0
 
     res = ler(client, tarefas, teto)
-    pend = [t[0] for t in tarefas if t[0] not in res]
+    pend = [t[0] for t in tarefas if t[0] not in res] + cortadas
+    ULTIMO.update(tarefas=len(tarefas), lidas=len(res), pendentes=len(pend))
     for i, r in res.items():
         estado[i] = {**meta[i], "leitura": r}
     print(f"[leitura] lidas {len(res)} | ficaram para amanhã {len(pend)} | custo estimado "
@@ -383,6 +386,7 @@ def main():
           f"| meses comparáveis {len(meses)} | níveis {dict(Counter(niveis.values()))} | "
           f"subiram hoje {len(subiu)}")
 
+    ULTIMO.update(c=c, niveis=niveis, subiu=subiu, meses=meses)
     enviar = forcar or hoje.day == 1 or (bool(subiu) and not primeira)
     motivo = ("pedido" if forcar else "fechamento do mês" if hoje.day == 1
               else "evidência nova" if enviar else "")
